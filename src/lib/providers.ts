@@ -1,0 +1,632 @@
+import { createHash } from "node:crypto";
+
+import { createAppAuth } from "@octokit/auth-app";
+
+import { decryptSecret, encryptSecret } from "@/lib/crypto";
+import type {
+  Decision,
+  GitHubConnection,
+  GitHubPermissionResult,
+  NormalizedAccessRequest,
+  SlackConnection,
+  SlackPostResult,
+} from "@/lib/domain";
+import { STORE_KEYS } from "@/lib/domain";
+import { requireEnv } from "@/lib/env";
+import { AppError } from "@/lib/errors";
+import { interpretPermission } from "@/lib/permissions";
+import type { KeyValueStore } from "@/lib/store";
+
+const GITHUB_API_VERSION = "2026-03-10";
+const SLACK_AUTH_ERRORS = new Set([
+  "invalid_auth",
+  "token_revoked",
+  "token_expired",
+  "account_inactive",
+  "not_authed",
+  "missing_scope",
+]);
+
+type JsonObject = Record<string, unknown>;
+
+async function safeJson(response: Response): Promise<JsonObject> {
+  try {
+    return (await response.json()) as JsonObject;
+  } catch {
+    return {};
+  }
+}
+
+function numericStatus(error: unknown): number | null {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    typeof error.status === "number"
+  ) {
+    return error.status;
+  }
+  return null;
+}
+
+function githubHeaders(token: string): HeadersInit {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${token}`,
+    "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    "User-Agent": "github-access-triage",
+  };
+}
+
+async function mintGitHubToken(
+  installationId: number,
+): Promise<string> {
+  try {
+    const auth = createAppAuth({
+      appId: requireEnv("GITHUB_APP_ID"),
+      privateKey: requireEnv("GITHUB_PRIVATE_KEY").replace(/\\n/g, "\n"),
+      installationId,
+    });
+    const result = await auth({ type: "installation" });
+    return result.token;
+  } catch (error) {
+    const status = numericStatus(error);
+    throw new AppError(
+      "GITHUB_CONNECTION_REQUIRED",
+      "The GitHub App installation is no longer available. Reconnect GitHub.",
+      503,
+      {
+        credentialInvalid: status === 401 || status === 404,
+        cause: error,
+      },
+    );
+  }
+}
+
+async function markGitHubInvalid(
+  store: KeyValueStore,
+  connection: GitHubConnection,
+): Promise<void> {
+  await store.set(STORE_KEYS.githubConnection, {
+    ...connection,
+    status: "invalid" as const,
+  });
+}
+
+async function markSlackInvalid(
+  store: KeyValueStore,
+  connection: SlackConnection,
+): Promise<void> {
+  await store.set(STORE_KEYS.slackConnection, {
+    ...connection,
+    status: "invalid" as const,
+  });
+}
+
+export interface GitHubProvider {
+  readEffectivePermission(
+    connection: GitHubConnection,
+    request: NormalizedAccessRequest,
+  ): Promise<GitHubPermissionResult>;
+}
+
+export interface SlackProvider {
+  postAccessRequest(
+    connection: SlackConnection,
+    request: NormalizedAccessRequest,
+    decision: Decision,
+    permission: GitHubPermissionResult,
+    runId: string,
+  ): Promise<SlackPostResult>;
+}
+
+export class LiveGitHubProvider implements GitHubProvider {
+  constructor(
+    private readonly store: KeyValueStore,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  async readEffectivePermission(
+    connection: GitHubConnection,
+    request: NormalizedAccessRequest,
+  ): Promise<GitHubPermissionResult> {
+    let token: string;
+    try {
+      token = await mintGitHubToken(connection.installationId);
+    } catch (error) {
+      if (error instanceof AppError && error.credentialInvalid) {
+        await markGitHubInvalid(this.store, connection);
+      }
+      throw error;
+    }
+
+    const [owner, repo] = request.repository.split("/");
+    const call = (path: string) =>
+      fetch(`https://api.github.com${path}`, {
+        headers: githubHeaders(token),
+        cache: "no-store",
+      });
+
+    let repositoryResponse: Response;
+    try {
+      repositoryResponse = await call(`/repos/${owner}/${repo}`);
+    } catch (error) {
+      throw new AppError(
+        "GITHUB_PROVIDER_UNAVAILABLE",
+        "GitHub could not be reached. Retry the request.",
+        502,
+        { cause: error },
+      );
+    }
+
+    if (repositoryResponse.status === 404) {
+      throw new AppError(
+        "GITHUB_REPOSITORY_NOT_ACCESSIBLE",
+        "The repository was not found or is not accessible to the GitHub App.",
+        404,
+      );
+    }
+    await this.assertGitHubResponse(repositoryResponse, connection);
+    await this.refreshVerification(connection);
+
+    const userResponse = await call(
+      `/users/${encodeURIComponent(request.githubUsername)}`,
+    );
+    if (userResponse.status === 404) {
+      throw new AppError(
+        "GITHUB_USER_NOT_FOUND",
+        "The supplied GitHub user was not found.",
+        404,
+      );
+    }
+    await this.assertGitHubResponse(userResponse, connection);
+
+    const permissionResponse = await call(
+      `/repos/${owner}/${repo}/collaborators/${encodeURIComponent(
+        request.githubUsername,
+      )}/permission`,
+    );
+    if (permissionResponse.status === 404) {
+      return interpretPermission("none", "none");
+    }
+    await this.assertGitHubResponse(permissionResponse, connection);
+    const body = await safeJson(permissionResponse);
+
+    return interpretPermission(
+      typeof body.role_name === "string" ? body.role_name : null,
+      typeof body.permission === "string" ? body.permission : null,
+    );
+  }
+
+  private async assertGitHubResponse(
+    response: Response,
+    connection: GitHubConnection,
+  ): Promise<void> {
+    if (response.ok) {
+      return;
+    }
+    if (response.status === 401) {
+      await markGitHubInvalid(this.store, connection);
+      throw new AppError(
+        "GITHUB_CONNECTION_REQUIRED",
+        "GitHub rejected the installation credentials. Reconnect GitHub.",
+        503,
+        { credentialInvalid: true },
+      );
+    }
+    if (
+      response.status === 403 &&
+      response.headers.get("x-ratelimit-remaining") === "0"
+    ) {
+      throw new AppError(
+        "GITHUB_RATE_LIMITED",
+        "GitHub rate-limited the permission lookup. Retry later.",
+        502,
+      );
+    }
+    throw new AppError(
+      "GITHUB_PROVIDER_ERROR",
+      "GitHub could not complete the permission lookup.",
+      502,
+    );
+  }
+
+  private async refreshVerification(
+    connection: GitHubConnection,
+  ): Promise<void> {
+    try {
+      await this.store.set(STORE_KEYS.githubConnection, {
+        ...connection,
+        status: "connected" as const,
+        lastVerifiedAt: this.now().toISOString(),
+      });
+    } catch {
+      // Verification freshness is noncritical to the access decision.
+    }
+  }
+}
+
+function slackAad(teamId: string): string {
+  return `slack:${teamId}:v1`;
+}
+
+function decisionLabel(decision: Decision): string {
+  switch (decision) {
+    case "approval_needed":
+      return "Approval needed";
+    case "already_sufficient":
+      return "Already sufficient";
+    case "manual_review":
+      return "Manual review";
+  }
+}
+
+function buildSlackBlocks(
+  request: NormalizedAccessRequest,
+  decision: Decision,
+  permission: GitHubPermissionResult,
+  runId: string,
+): JsonObject[] {
+  const effective = permission.isCustomRole
+    ? `Custom role: ${permission.roleName ?? "unknown"}`
+    : (permission.effectivePermission ?? "none");
+
+  return [
+    {
+      type: "header",
+      text: {
+        type: "plain_text",
+        text: `GitHub access · ${decisionLabel(decision)}`,
+      },
+    },
+    {
+      type: "section",
+      fields: [
+        {
+          type: "plain_text",
+          text: `Requester\n${request.githubUsername}`,
+        },
+        {
+          type: "plain_text",
+          text: `Repository\n${request.repository}`,
+        },
+        {
+          type: "plain_text",
+          text: `Current access\n${effective}`,
+        },
+        {
+          type: "plain_text",
+          text: `Requested access\n${request.requestedPermission}`,
+        },
+      ],
+    },
+    {
+      type: "section",
+      text: {
+        type: "plain_text",
+        text: `Reason\n${request.reason}`,
+      },
+    },
+    {
+      type: "context",
+      elements: [
+        {
+          type: "plain_text",
+          text: `Request ${request.requestId ?? runId}`,
+        },
+      ],
+    },
+  ];
+}
+
+export class LiveSlackProvider implements SlackProvider {
+  constructor(
+    private readonly store: KeyValueStore,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  async postAccessRequest(
+    connection: SlackConnection,
+    request: NormalizedAccessRequest,
+    decision: Decision,
+    permission: GitHubPermissionResult,
+    runId: string,
+  ): Promise<SlackPostResult> {
+    const token = decryptSecret(
+      connection.encryptedBotToken,
+      requireEnv("TOKEN_ENCRYPTION_KEY"),
+      slackAad(connection.teamId),
+    );
+
+    let response: Response;
+    try {
+      response = await fetch("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({
+          channel: request.slackChannel,
+          text: `GitHub access request ${request.requestId ?? runId}`,
+          blocks: buildSlackBlocks(
+            request,
+            decision,
+            permission,
+            runId,
+          ),
+          unfurl_links: false,
+          unfurl_media: false,
+        }),
+        cache: "no-store",
+      });
+    } catch (error) {
+      throw new AppError(
+        "SLACK_DELIVERY_UNKNOWN",
+        "Slack did not confirm delivery. The request is held briefly to reduce duplicate risk.",
+        502,
+        { ambiguousDelivery: true, cause: error },
+      );
+    }
+
+    if (response.status === 429) {
+      const retryAfterSeconds = Number.parseInt(
+        response.headers.get("retry-after") ?? "0",
+        10,
+      );
+      throw new AppError(
+        "SLACK_RATE_LIMITED",
+        "Slack rate-limited the post. Retry after the indicated delay.",
+        429,
+        {
+          retryAfterSeconds: Number.isFinite(retryAfterSeconds)
+            ? retryAfterSeconds
+            : undefined,
+        },
+      );
+    }
+
+    const body = await safeJson(response);
+    if (!response.ok || body.ok !== true) {
+      const providerCode =
+        typeof body.error === "string" ? body.error : "unknown_error";
+      if (SLACK_AUTH_ERRORS.has(providerCode)) {
+        await markSlackInvalid(this.store, connection);
+        throw new AppError(
+          "SLACK_CONNECTION_REQUIRED",
+          "Slack rejected the stored credentials. Reconnect Slack.",
+          503,
+          { credentialInvalid: true },
+        );
+      }
+      if (providerCode === "not_in_channel") {
+        throw new AppError(
+          "SLACK_BOT_NOT_IN_CHANNEL",
+          "The Slack bot is not a member of the supplied channel. Invite it or use the demo channel documented in the README.",
+          422,
+        );
+      }
+      if (providerCode === "channel_not_found") {
+        throw new AppError(
+          "SLACK_CHANNEL_NOT_FOUND",
+          "The supplied Slack channel was not found or is not accessible to the connected bot.",
+          422,
+        );
+      }
+      throw new AppError(
+        "SLACK_POST_REJECTED",
+        "Slack rejected the message. No message was confirmed.",
+        502,
+      );
+    }
+
+    if (typeof body.ts !== "string") {
+      throw new AppError(
+        "SLACK_DELIVERY_UNKNOWN",
+        "Slack accepted the request but did not return a message identifier.",
+        502,
+        { ambiguousDelivery: true },
+      );
+    }
+
+    try {
+      await this.store.set(STORE_KEYS.slackConnection, {
+        ...connection,
+        status: "connected" as const,
+        lastVerifiedAt: this.now().toISOString(),
+      });
+    } catch {
+      // Receipt persistence is the first critical write after this method returns.
+    }
+
+    return { messageTs: body.ts };
+  }
+}
+
+export async function exchangeGitHubOAuthCode(input: {
+  code: string;
+  codeVerifier: string;
+  redirectUri: string;
+}): Promise<string> {
+  const response = await fetch(
+    "https://github.com/login/oauth/access_token",
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        client_id: requireEnv("GITHUB_CLIENT_ID"),
+        client_secret: requireEnv("GITHUB_CLIENT_SECRET"),
+        code: input.code,
+        code_verifier: input.codeVerifier,
+        redirect_uri: input.redirectUri,
+      }),
+      cache: "no-store",
+    },
+  );
+  const body = await safeJson(response);
+  if (!response.ok || typeof body.access_token !== "string") {
+    throw new AppError(
+      "GITHUB_OAUTH_FAILED",
+      "GitHub could not verify the installation.",
+      502,
+    );
+  }
+  return body.access_token;
+}
+
+export async function verifyGitHubInstallation(input: {
+  installationId: number;
+  userToken: string;
+  now?: Date;
+}): Promise<GitHubConnection> {
+  const userResponse = await fetch(
+    `https://api.github.com/user/installations/${input.installationId}/repositories?per_page=1`,
+    {
+      headers: githubHeaders(input.userToken),
+      cache: "no-store",
+    },
+  );
+  if (!userResponse.ok) {
+    throw new AppError(
+      "GITHUB_INSTALLATION_NOT_VERIFIED",
+      "The signed-in GitHub user could not verify this installation.",
+      403,
+    );
+  }
+  const userBody = await safeJson(userResponse);
+  const installation =
+    typeof userBody.installation === "object" && userBody.installation
+      ? (userBody.installation as JsonObject)
+      : {};
+  const account =
+    typeof installation.account === "object" && installation.account
+      ? (installation.account as JsonObject)
+      : {};
+
+  // Also prove the App can mint an installation token before replacing state.
+  await mintGitHubToken(input.installationId);
+  const verifiedAt = (input.now ?? new Date()).toISOString();
+  return {
+    version: 1,
+    provider: "github",
+    status: "connected",
+    installationId: input.installationId,
+    accountLogin:
+      typeof account.login === "string" ? account.login : "GitHub installation",
+    accountType:
+      account.type === "Organization" ? "Organization" : "User",
+    repositorySelection:
+      installation.repository_selection === "all" ? "all" : "selected",
+    connectedAt: verifiedAt,
+    lastVerifiedAt: verifiedAt,
+  };
+}
+
+type SlackOAuthResponse = {
+  ok?: boolean;
+  access_token?: string;
+  token_type?: string;
+  scope?: string;
+  bot_user_id?: string;
+  team?: { id?: string; name?: string };
+  error?: string;
+  refresh_token?: string;
+  expires_in?: number;
+};
+
+export async function exchangeAndVerifySlack(input: {
+  code: string;
+  redirectUri: string;
+  now?: Date;
+}): Promise<SlackConnection> {
+  const credentials = Buffer.from(
+    `${requireEnv("SLACK_CLIENT_ID")}:${requireEnv("SLACK_CLIENT_SECRET")}`,
+  ).toString("base64");
+  const response = await fetch("https://slack.com/api/oauth.v2.access", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      code: input.code,
+      redirect_uri: input.redirectUri,
+    }),
+    cache: "no-store",
+  });
+  const body = (await safeJson(response)) as SlackOAuthResponse;
+
+  if (
+    !response.ok ||
+    body.ok !== true ||
+    !body.access_token ||
+    !body.team?.id
+  ) {
+    throw new AppError(
+      "SLACK_OAUTH_FAILED",
+      "Slack could not complete the connection.",
+      502,
+    );
+  }
+  if (body.refresh_token || body.expires_in) {
+    throw new AppError(
+      "SLACK_TOKEN_ROTATION_UNSUPPORTED",
+      "Disable Slack token rotation for this scoped demo before reconnecting.",
+      400,
+    );
+  }
+
+  const scopes = (body.scope ?? "")
+    .split(",")
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+  if (!scopes.includes("chat:write")) {
+    throw new AppError(
+      "SLACK_SCOPE_REQUIRED",
+      "The Slack connection did not grant chat:write.",
+      403,
+    );
+  }
+
+  const authTestResponse = await fetch("https://slack.com/api/auth.test", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${body.access_token}` },
+    cache: "no-store",
+  });
+  const authTest = await safeJson(authTestResponse);
+  if (!authTestResponse.ok || authTest.ok !== true) {
+    throw new AppError(
+      "SLACK_OAUTH_FAILED",
+      "Slack returned a token that could not be verified.",
+      502,
+    );
+  }
+
+  const verifiedAt = (input.now ?? new Date()).toISOString();
+  return {
+    version: 1,
+    provider: "slack",
+    status: "connected",
+    encryptedBotToken: encryptSecret(
+      body.access_token,
+      requireEnv("TOKEN_ENCRYPTION_KEY"),
+      slackAad(body.team.id),
+    ),
+    teamId: body.team.id,
+    teamName: body.team.name ?? "Slack workspace",
+    botUserId:
+      typeof authTest.user_id === "string"
+        ? authTest.user_id
+        : (body.bot_user_id ?? null),
+    scopes,
+    connectedAt: verifiedAt,
+    lastVerifiedAt: verifiedAt,
+  };
+}
+
+export function pkceChallenge(verifier: string): string {
+  return createHash("sha256").update(verifier).digest("base64url");
+}
