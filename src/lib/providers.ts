@@ -83,6 +83,31 @@ async function mintGitHubToken(
   }
 }
 
+async function readGitHubInstallationMetadata(
+  installationId: number,
+): Promise<JsonObject> {
+  const auth = createAppAuth({
+    appId: requireEnv("GITHUB_APP_ID"),
+    privateKey: requireEnv("GITHUB_PRIVATE_KEY").replace(/\\n/g, "\n"),
+  });
+  const appAuthentication = await auth({ type: "app" });
+  const response = await fetch(
+    `https://api.github.com/app/installations/${installationId}`,
+    {
+      headers: githubHeaders(appAuthentication.token),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    throw new AppError(
+      "GITHUB_INSTALLATION_NOT_VERIFIED",
+      "The GitHub App could not verify this installation.",
+      403,
+    );
+  }
+  return safeJson(response);
+}
+
 async function markGitHubInvalid(
   store: KeyValueStore,
   connection: GitHubConnection,
@@ -497,10 +522,9 @@ export async function verifyGitHubInstallation(input: {
     );
   }
   const userBody = await safeJson(userResponse);
-  const installation =
-    typeof userBody.installation === "object" && userBody.installation
-      ? (userBody.installation as JsonObject)
-      : {};
+  const installation = await readGitHubInstallationMetadata(
+    input.installationId,
+  );
   const account =
     typeof installation.account === "object" && installation.account
       ? (installation.account as JsonObject)
@@ -519,7 +543,10 @@ export async function verifyGitHubInstallation(input: {
     accountType:
       account.type === "Organization" ? "Organization" : "User",
     repositorySelection:
-      installation.repository_selection === "all" ? "all" : "selected",
+      (installation.repository_selection ??
+        userBody.repository_selection) === "all"
+        ? "all"
+        : "selected",
     connectedAt: verifiedAt,
     lastVerifiedAt: verifiedAt,
   };

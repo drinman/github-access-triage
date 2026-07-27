@@ -49,6 +49,9 @@ describe("secret encryption", () => {
     expect(() =>
       decryptSecret(parts.join("."), key, "slack:T1:v1"),
     ).toThrow();
+    expect(() =>
+      decryptSecret(first, key, "slack:other-workspace:v1"),
+    ).toThrow();
   });
 });
 
