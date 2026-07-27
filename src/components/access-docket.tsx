@@ -17,6 +17,10 @@ export type DocketSnapshot = {
 type AccessDocketProps = {
   snapshot: DocketSnapshot;
   demoChannelId?: string;
+  notice?: {
+    tone: "success" | "error";
+    message: string;
+  };
 };
 
 type FlowStepProps = {
@@ -182,6 +186,7 @@ function Safeguard({
 export function AccessDocket({
   snapshot,
   demoChannelId = "Set in README",
+  notice,
 }: AccessDocketProps) {
   const isReady =
     snapshot.github.status === "connected" && snapshot.slack.status === "connected";
@@ -208,6 +213,16 @@ export function AccessDocket({
       </header>
 
       <main>
+        {notice ? (
+          <div
+            className="setup-notice"
+            data-tone={notice.tone}
+            role={notice.tone === "error" ? "alert" : "status"}
+          >
+            <span aria-hidden="true" />
+            <p>{notice.message}</p>
+          </div>
+        ) : null}
         <section className="hero" aria-labelledby="page-title">
           <div className="hero__index" aria-hidden="true">
             01 / SETUP

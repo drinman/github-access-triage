@@ -112,20 +112,28 @@ async function markGitHubInvalid(
   store: KeyValueStore,
   connection: GitHubConnection,
 ): Promise<void> {
-  await store.set(STORE_KEYS.githubConnection, {
-    ...connection,
-    status: "invalid" as const,
-  });
+  await store.compareAndSet(
+    STORE_KEYS.githubConnection,
+    connection,
+    {
+      ...connection,
+      status: "invalid" as const,
+    },
+  );
 }
 
 async function markSlackInvalid(
   store: KeyValueStore,
   connection: SlackConnection,
 ): Promise<void> {
-  await store.set(STORE_KEYS.slackConnection, {
-    ...connection,
-    status: "invalid" as const,
-  });
+  await store.compareAndSet(
+    STORE_KEYS.slackConnection,
+    connection,
+    {
+      ...connection,
+      status: "invalid" as const,
+    },
+  );
 }
 
 export interface GitHubProvider {
@@ -155,34 +163,39 @@ export class LiveGitHubProvider implements GitHubProvider {
     connection: GitHubConnection,
     request: NormalizedAccessRequest,
   ): Promise<GitHubPermissionResult> {
+    let currentConnection = connection;
     let token: string;
     try {
       token = await mintGitHubToken(connection.installationId);
     } catch (error) {
       if (error instanceof AppError && error.credentialInvalid) {
-        await markGitHubInvalid(this.store, connection);
+        try {
+          await markGitHubInvalid(this.store, connection);
+        } catch {
+          // Preserve the provider error if status persistence is unavailable.
+        }
       }
       throw error;
     }
 
     const [owner, repo] = request.repository.split("/");
-    const call = (path: string) =>
-      fetch(`https://api.github.com${path}`, {
-        headers: githubHeaders(token),
-        cache: "no-store",
-      });
+    const call = async (path: string) => {
+      try {
+        return await fetch(`https://api.github.com${path}`, {
+          headers: githubHeaders(token),
+          cache: "no-store",
+        });
+      } catch (error) {
+        throw new AppError(
+          "GITHUB_PROVIDER_UNAVAILABLE",
+          "GitHub could not be reached. Retry the request.",
+          502,
+          { cause: error },
+        );
+      }
+    };
 
-    let repositoryResponse: Response;
-    try {
-      repositoryResponse = await call(`/repos/${owner}/${repo}`);
-    } catch (error) {
-      throw new AppError(
-        "GITHUB_PROVIDER_UNAVAILABLE",
-        "GitHub could not be reached. Retry the request.",
-        502,
-        { cause: error },
-      );
-    }
+    const repositoryResponse = await call(`/repos/${owner}/${repo}`);
 
     if (repositoryResponse.status === 404) {
       throw new AppError(
@@ -191,8 +204,8 @@ export class LiveGitHubProvider implements GitHubProvider {
         404,
       );
     }
-    await this.assertGitHubResponse(repositoryResponse, connection);
-    await this.refreshVerification(connection);
+    await this.assertGitHubResponse(repositoryResponse, currentConnection);
+    currentConnection = await this.refreshVerification(currentConnection);
 
     const userResponse = await call(
       `/users/${encodeURIComponent(request.githubUsername)}`,
@@ -204,7 +217,7 @@ export class LiveGitHubProvider implements GitHubProvider {
         404,
       );
     }
-    await this.assertGitHubResponse(userResponse, connection);
+    await this.assertGitHubResponse(userResponse, currentConnection);
 
     const permissionResponse = await call(
       `/repos/${owner}/${repo}/collaborators/${encodeURIComponent(
@@ -214,7 +227,7 @@ export class LiveGitHubProvider implements GitHubProvider {
     if (permissionResponse.status === 404) {
       return interpretPermission("none", "none");
     }
-    await this.assertGitHubResponse(permissionResponse, connection);
+    await this.assertGitHubResponse(permissionResponse, currentConnection);
     const body = await safeJson(permissionResponse);
 
     return interpretPermission(
@@ -231,7 +244,11 @@ export class LiveGitHubProvider implements GitHubProvider {
       return;
     }
     if (response.status === 401) {
-      await markGitHubInvalid(this.store, connection);
+      try {
+        await markGitHubInvalid(this.store, connection);
+      } catch {
+        // Preserve the provider error if status persistence is unavailable.
+      }
       throw new AppError(
         "GITHUB_CONNECTION_REQUIRED",
         "GitHub rejected the installation credentials. Reconnect GitHub.",
@@ -258,15 +275,22 @@ export class LiveGitHubProvider implements GitHubProvider {
 
   private async refreshVerification(
     connection: GitHubConnection,
-  ): Promise<void> {
+  ): Promise<GitHubConnection> {
+    const refreshed: GitHubConnection = {
+      ...connection,
+      status: "connected",
+      lastVerifiedAt: this.now().toISOString(),
+    };
     try {
-      await this.store.set(STORE_KEYS.githubConnection, {
-        ...connection,
-        status: "connected" as const,
-        lastVerifiedAt: this.now().toISOString(),
-      });
+      const updated = await this.store.compareAndSet(
+        STORE_KEYS.githubConnection,
+        connection,
+        refreshed,
+      );
+      return updated ? refreshed : connection;
     } catch {
       // Verification freshness is noncritical to the access decision.
+      return connection;
     }
   }
 }
@@ -416,7 +440,11 @@ export class LiveSlackProvider implements SlackProvider {
       const providerCode =
         typeof body.error === "string" ? body.error : "unknown_error";
       if (SLACK_AUTH_ERRORS.has(providerCode)) {
-        await markSlackInvalid(this.store, connection);
+        try {
+          await markSlackInvalid(this.store, connection);
+        } catch {
+          // Preserve the provider error if status persistence is unavailable.
+        }
         throw new AppError(
           "SLACK_CONNECTION_REQUIRED",
           "Slack rejected the stored credentials. Reconnect Slack.",
@@ -438,6 +466,18 @@ export class LiveSlackProvider implements SlackProvider {
           422,
         );
       }
+      if (
+        response.status >= 500 ||
+        providerCode === "internal_error" ||
+        providerCode === "fatal_error"
+      ) {
+        throw new AppError(
+          "SLACK_DELIVERY_UNKNOWN",
+          "Slack did not confirm whether the message was posted. The request is held briefly to reduce duplicate risk.",
+          502,
+          { ambiguousDelivery: true },
+        );
+      }
       throw new AppError(
         "SLACK_POST_REJECTED",
         "Slack rejected the message. No message was confirmed.",
@@ -455,11 +495,15 @@ export class LiveSlackProvider implements SlackProvider {
     }
 
     try {
-      await this.store.set(STORE_KEYS.slackConnection, {
-        ...connection,
-        status: "connected" as const,
-        lastVerifiedAt: this.now().toISOString(),
-      });
+      await this.store.compareAndSet(
+        STORE_KEYS.slackConnection,
+        connection,
+        {
+          ...connection,
+          status: "connected" as const,
+          lastVerifiedAt: this.now().toISOString(),
+        },
+      );
     } catch {
       // Receipt persistence is the first critical write after this method returns.
     }

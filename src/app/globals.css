@@ -95,6 +95,40 @@ a {
   border-bottom: 1px solid var(--ink);
 }
 
+.setup-notice {
+  display: flex;
+  width: min(100% - 48px, 1380px);
+  align-items: center;
+  gap: 12px;
+  margin: 24px auto -18px;
+  border: 1px solid var(--line-strong);
+  background: var(--paper-bright);
+  color: var(--ink-soft);
+  padding: 13px 16px;
+  font-size: 13px;
+}
+
+.setup-notice > span {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--forest-light);
+}
+
+.setup-notice[data-tone="error"] {
+  border-color: var(--rust);
+  background: var(--rust-soft);
+}
+
+.setup-notice[data-tone="error"] > span {
+  background: var(--rust);
+}
+
+.setup-notice p {
+  margin: 0;
+}
+
 .wordmark {
   display: inline-flex;
   align-items: center;
@@ -1099,7 +1133,8 @@ a {
   .site-header,
   .site-footer,
   .hero,
-  .docket-layout {
+  .docket-layout,
+  .setup-notice {
     width: min(100% - 32px, 1380px);
   }
 

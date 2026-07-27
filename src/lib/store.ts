@@ -12,7 +12,7 @@ export interface KeyValueStore {
     key: string,
     expected: T,
     next: T,
-    ttlSeconds: number,
+    ttlSeconds?: number,
   ): Promise<boolean>;
   compareAndDelete<T>(key: string, expected: T): Promise<boolean>;
   delete(key: string): Promise<void>;
@@ -68,12 +68,16 @@ export class UpstashStore implements KeyValueStore {
     key: string,
     expected: T,
     next: T,
-    ttlSeconds: number,
+    ttlSeconds?: number,
   ): Promise<boolean> {
     const script = this.client().createScript<number>(
       [
         'if redis.call("get", KEYS[1]) == ARGV[1] then',
-        '  redis.call("set", KEYS[1], ARGV[2], "EX", ARGV[3])',
+        '  if ARGV[3] ~= "" then',
+        '    redis.call("set", KEYS[1], ARGV[2], "EX", ARGV[3])',
+        "  else",
+        '    redis.call("set", KEYS[1], ARGV[2])',
+        "  end",
         "  return 1",
         "end",
         "return 0",
@@ -81,7 +85,11 @@ export class UpstashStore implements KeyValueStore {
     );
     const result = await script.eval(
       [key],
-      [encode(expected), encode(next), String(ttlSeconds)],
+      [
+        encode(expected),
+        encode(next),
+        ttlSeconds === undefined ? "" : String(ttlSeconds),
+      ],
     );
     return result === 1;
   }
@@ -157,7 +165,7 @@ export class MemoryStore implements KeyValueStore {
     key: string,
     expected: T,
     next: T,
-    ttlSeconds: number,
+    ttlSeconds?: number,
   ): Promise<boolean> {
     if (this.current(key)?.encoded !== encode(expected)) {
       return false;

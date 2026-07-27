@@ -200,6 +200,39 @@ describe("workflow", () => {
     expect(result.receipt.outcome).toBe("manual_review");
   });
 
+  it("holds an ambiguous Slack delivery until the processing TTL expires", async () => {
+    const store = await connectedStore();
+    const first = await executeAccessRequest(
+      request,
+      fixedDependencies(
+        store,
+        providers({
+          slackError: new AppError(
+            "SLACK_DELIVERY_UNKNOWN",
+            "Delivery could not be confirmed",
+            502,
+            { ambiguousDelivery: true },
+          ),
+        }),
+      ),
+    );
+    expect(first.receipt).toMatchObject({
+      status: "failed",
+      error: { code: "SLACK_DELIVERY_UNKNOWN" },
+    });
+
+    const retryProviders = providers();
+    const retry = await executeAccessRequest(
+      request,
+      fixedDependencies(store, retryProviders),
+    );
+    expect(retry).toMatchObject({
+      httpStatus: 409,
+      receipt: { error: { code: "REQUEST_IN_PROGRESS" } },
+    });
+    expect(retryProviders.slack.postAccessRequest).not.toHaveBeenCalled();
+  });
+
   it("stores partial_failure before a noncritical metadata write", async () => {
     class LastSuccessFailingStore extends MemoryStore {
       override async set<T>(
@@ -237,6 +270,47 @@ describe("workflow", () => {
     expect(replay.replayed).toBe(true);
     expect(replay.receipt.status).toBe("partial_failure");
     expect(providerSet.slack.postAccessRequest).toHaveBeenCalledOnce();
+  });
+
+  it("does not call an unpersisted Slack result partial_failure", async () => {
+    class ReplayPersistenceFailingStore extends MemoryStore {
+      override async compareAndSet<T>(
+        key: string,
+        expected: T,
+        next: T,
+        ttlSeconds?: number,
+      ): Promise<boolean> {
+        if (key.startsWith("access-triage:idempotency:")) {
+          throw new Error("receipt store unavailable");
+        }
+        return super.compareAndSet(key, expected, next, ttlSeconds);
+      }
+    }
+    const store = new ReplayPersistenceFailingStore();
+    await store.set(STORE_KEYS.githubConnection, githubConnection);
+    await store.set(STORE_KEYS.slackConnection, slackConnection);
+
+    const result = await executeAccessRequest(
+      request,
+      fixedDependencies(store, providers()),
+    );
+    expect(result).toMatchObject({
+      httpStatus: 200,
+      receipt: {
+        status: "indeterminate",
+        slack: { posted: true },
+        error: { code: "RECEIPT_PERSISTENCE_UNCONFIRMED" },
+      },
+    });
+
+    const immediateRetry = await executeAccessRequest(
+      request,
+      fixedDependencies(store, providers()),
+    );
+    expect(immediateRetry).toMatchObject({
+      httpStatus: 409,
+      receipt: { error: { code: "REQUEST_IN_PROGRESS" } },
+    });
   });
 
   it("returns degraded dependency errors without provider calls", async () => {

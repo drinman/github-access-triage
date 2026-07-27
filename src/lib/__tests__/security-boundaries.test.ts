@@ -167,4 +167,33 @@ describe("Slack provider boundary", () => {
     });
     expect(fetchMock).toHaveBeenCalledOnce();
   });
+
+  it("treats a Slack internal error as an ambiguous delivery", async () => {
+    vi.stubEnv("TOKEN_ENCRYPTION_KEY", encryptionKey);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ ok: false, error: "internal_error" }),
+          {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+
+    await expect(
+      new LiveSlackProvider(new MemoryStore()).postAccessRequest(
+        connection,
+        request,
+        "approval_needed",
+        permission,
+        "run",
+      ),
+    ).rejects.toMatchObject({
+      code: "SLACK_DELIVERY_UNKNOWN",
+      ambiguousDelivery: true,
+    });
+  });
 });

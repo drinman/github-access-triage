@@ -27,9 +27,17 @@ import type {
 import type { KeyValueStore } from "@/lib/store";
 
 export type WorkflowResult = {
-  receipt: PublicReceipt;
+  receipt: PublicReceipt | IndeterminateDeliveryReceipt;
   httpStatus: number;
   replayed: boolean;
+};
+
+export type IndeterminateDeliveryReceipt = Omit<
+  InternalReceipt,
+  "status" | "steps"
+> & {
+  status: "indeterminate";
+  steps?: ReceiptStep[];
 };
 
 export type WorkflowDependencies = {
@@ -317,18 +325,31 @@ export async function executeAccessRequest(
         provisional = null;
       }
       if (!provisional) {
-        return {
-          receipt: projectReceipt(
+        const unconfirmedReceipt: IndeterminateDeliveryReceipt = {
+          ...partialReceipt,
+          status: "indeterminate",
+          summary:
+            "Slack posted, but the app could not confirm replay protection.",
+          error: {
+            code: "RECEIPT_PERSISTENCE_UNCONFIRMED",
+            message:
+              "Slack posted, but replay protection could not be confirmed. Do not retry automatically.",
+          },
+          steps: [
+            ...steps.slice(0, 3),
             {
-              ...partialReceipt,
-              error: {
-                code: "RECEIPT_PERSISTENCE_UNCONFIRMED",
-                message:
-                  "Slack posted, but replay protection could not be confirmed. Do not retry automatically.",
-              },
+              name: "receipt",
+              status: "failed",
+              detail:
+                "Slack posted, but the replayable receipt could not be confirmed.",
             },
-            request.includeDetails,
-          ),
+          ],
+        };
+        if (!request.includeDetails) {
+          delete unconfirmedReceipt.steps;
+        }
+        return {
+          receipt: unconfirmedReceipt,
           httpStatus: 200,
           replayed: false,
         };

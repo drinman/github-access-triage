@@ -307,6 +307,13 @@ Slack rejection and rate limiting are `failed`, never `partial_failure`.
 The app reads `Retry-After` but intentionally makes exactly one Slack call;
 queues and automatic retry policy are outside this MVP.
 
+One exceptional response sits outside that normal three-state taxonomy:
+`indeterminate` means Slack confirmed the post but Redis could not confirm the
+first replay record. It returns HTTP `200`, explicitly reports
+`RECEIPT_PERSISTENCE_UNCONFIRMED`, and tells the caller not to retry
+automatically. The owner-scoped processing record is left to expire rather
+than being deleted. This response never claims that replay protection exists.
+
 Slack membership errors are actionable:
 
 - `SLACK_BOT_NOT_IN_CHANNEL`: invite the bot or use the demo channel above.
@@ -384,8 +391,9 @@ Do not put `WEBHOOK_SECRET` in this repository. Send it separately.
 ## Build calibration and AI use
 
 The implementation work was timeboxed after a separate planning and review
-pass. **Recorded implementation window: replace with the final measured
-start/end time before submission.**
+pass. **Recorded implementation window: July 27, 2026, 4:16–4:39 PM PT
+(23 minutes). External-account setup and live acceptance are not included in
+that window and remain pending.**
 
 I used OpenAI Codex as a pair-programming tool for planning, implementation,
 test generation, documentation, and verification. I reviewed the generated

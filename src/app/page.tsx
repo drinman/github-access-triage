@@ -8,7 +8,14 @@ import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-export default async function Home() {
+type HomeProps = {
+  searchParams?: Promise<{
+    connected?: string;
+    connectionError?: string;
+  }>;
+};
+
+export default async function Home({ searchParams }: HomeProps) {
   const session = await getAdminSession();
   if (!session) {
     redirect("/login");
@@ -34,10 +41,24 @@ export default async function Home() {
     },
     lastSuccessfulRunAt,
   };
+  const params = searchParams ? await searchParams : undefined;
+  const provider = params?.connected ?? params?.connectionError;
+  const notice = params?.connected
+    ? {
+        tone: "success" as const,
+        message: `${provider === "github" ? "GitHub" : "Slack"} connected and verified. Runtime state was replaced without a redeploy.`,
+      }
+    : params?.connectionError
+      ? {
+          tone: "error" as const,
+          message: `${provider === "github" ? "GitHub" : "Slack"} could not be verified. The prior working connection, if any, was left unchanged.`,
+        }
+      : undefined;
 
   return (
     <AccessDocket
       snapshot={snapshot}
+      notice={notice}
       demoChannelId={
         process.env.DEMO_SLACK_CHANNEL_ID ?? "Set DEMO_SLACK_CHANNEL_ID"
       }
