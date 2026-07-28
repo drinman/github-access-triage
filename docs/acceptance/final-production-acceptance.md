@@ -3,6 +3,11 @@
 Production acceptance ran on July 28, 2026 from 2:44 PM to 2:45 PM PT against
 runtime commit `663d493aa554dff7e7a3f8b730f511988f81223d`.
 
+Acceptance was executed against runtime commit `663d493`; commits between
+`663d493` and submission evidence commit `847d738` modify documentation and
+screenshots only, verified by diff. The forward commit adding this clarification
+also changes documentation only.
+
 These receipts contain no credentials. The Bearer secret, admin password,
 provider credentials, encryption key, and Upstash credentials were not
 captured.
