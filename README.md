@@ -1,11 +1,13 @@
 # GitHub Access Request Triage
 
 GitHub Access Request Triage checks a person’s effective permission on one
-private GitHub repository, posts an approval-ready summary to Slack, and
-returns a contextual execution receipt.
+private GitHub repository, posts a review-ready handoff to Slack, and returns
+a contextual execution receipt.
 
-The app stops at the human decision boundary. It never grants, changes, or
-revokes GitHub access.
+The Slack handoff gives a reviewer a clear next step and, when action is
+required, a direct link to the repository’s GitHub access settings. A person
+decides what to do and makes any permission change in GitHub. The app never
+grants, changes, or revokes access.
 
 ## Live demo
 
@@ -49,7 +51,8 @@ The request does four things:
 
 1. Authenticates the caller.
 2. Reads `octocat`’s effective permission from GitHub.
-3. Posts one approval card to `#access-requests`.
+3. Posts one review summary to `#access-requests`, including the next step and,
+   when action is required, a direct GitHub access-settings link.
 4. Returns the decision, provider context, step results, and Slack timestamp.
 
 Run the same command again without changing `REQUEST_ID`. The response includes
@@ -102,8 +105,9 @@ records, and the latest successful run time.
 2. **Keep the action narrow.** GitHub is read-only. Slack gets only
    `chat:write`. Production requests are limited to the configured demo
    repository and channel.
-3. **Stop before access changes.** The workflow gathers context and writes an
-   approval card. A person makes the permission decision.
+3. **Stop before access changes.** The workflow gathers context and posts a
+   manual handoff with a direct GitHub settings link when action is required.
+   A person makes the decision and any resulting permission change.
 4. **Report uncertain delivery honestly.** Owner-scoped idempotency prevents
    normal duplicate posts. The receipt still distinguishes confirmed,
    retryable, partial, and indeterminate outcomes because Slack and Redis do

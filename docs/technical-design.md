@@ -109,7 +109,10 @@ The decisions are:
 | `manual_review` | GitHub returned an unknown custom role |
 
 The Slack card includes the requester, repository, current access, requested
-access, reason, decision, and run ID. It does not contain credentials.
+access, reason, decision, run ID, and a clear manual next step. For
+approval-required and manual-review outcomes, it includes a direct link to the
+repository’s GitHub access settings. It does not contain credentials. A person
+reviews the context and makes any access decision or change in GitHub.
 
 ## Idempotency state machine
 
@@ -212,6 +215,15 @@ probe either provider. The endpoint returns:
 
 It returns `Cache-Control: no-store` and no provider identities, request
 content, or credentials.
+
+## Production authorization boundary
+
+This demo stops at a manual Slack handoff. In a production authorization
+system, Slack identifies the actor; the identity provider resolves current
+employment, manager, and group membership; the policy engine authorizes the
+request; and a narrowly scoped executor provisions the permission and records
+the audit trail. Keeping those responsibilities separate prevents the Slack
+message itself from becoming the source of authorization.
 
 ## Security boundaries
 

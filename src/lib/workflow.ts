@@ -65,7 +65,7 @@ function summaryForDecision(
 ): string {
   switch (decision) {
     case "approval_needed":
-      return "The requester has less access than requested. Slack received an approval-ready message.";
+      return "The requester has less access than requested. Slack received a manual approval handoff.";
     case "already_sufficient":
       return "The requester already has sufficient access. Slack received an informational message.";
     case "manual_review":

@@ -398,12 +398,57 @@ function slackAad(teamId: string): string {
 function decisionLabel(decision: Decision): string {
   switch (decision) {
     case "approval_needed":
-      return "Approval needed";
+      return "Manual approval required";
     case "already_sufficient":
       return "Already sufficient";
     case "manual_review":
       return "Manual review";
   }
+}
+
+function githubRepositorySettingsUrl(repository: string): string {
+  const { owner, name } = parseRepository(repository);
+  return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/settings/access`;
+}
+
+function slackNextStep(
+  request: NormalizedAccessRequest,
+  decision: Decision,
+): string {
+  if (decision === "already_sufficient") {
+    return "*Next step:* No action required. The requester already has sufficient access.";
+  }
+
+  const settingsUrl = githubRepositorySettingsUrl(request.repository);
+  if (decision === "approval_needed") {
+    return `*Next step:* Review this request. If approved, grant the requested access in GitHub: <${settingsUrl}|Open repository access settings>.\nThis workflow does not change permissions automatically.`;
+  }
+
+  return `*Next step:* Review the custom role in GitHub settings: <${settingsUrl}|Open repository access settings>.\nThis workflow does not change permissions automatically.`;
+}
+
+function slackFallbackNextStep(
+  request: NormalizedAccessRequest,
+  decision: Decision,
+): string {
+  if (decision === "already_sufficient") {
+    return "Next step: No action required. The requester already has sufficient access.";
+  }
+
+  const settingsUrl = githubRepositorySettingsUrl(request.repository);
+  if (decision === "approval_needed") {
+    return `Next step: Review this request. If approved, grant the requested access in GitHub: ${settingsUrl}. This workflow does not change permissions automatically.`;
+  }
+
+  return `Next step: Review the custom role in GitHub settings: ${settingsUrl}. This workflow does not change permissions automatically.`;
+}
+
+function effectiveAccessLabel(
+  permission: GitHubPermissionResult,
+): string {
+  return permission.isCustomRole
+    ? `Custom role: ${permission.roleName ?? "unknown"}`
+    : (permission.effectivePermission ?? "none");
 }
 
 function buildSlackBlocks(
@@ -412,9 +457,7 @@ function buildSlackBlocks(
   permission: GitHubPermissionResult,
   runId: string,
 ): JsonObject[] {
-  const effective = permission.isCustomRole
-    ? `Custom role: ${permission.roleName ?? "unknown"}`
-    : (permission.effectivePermission ?? "none");
+  const effective = effectiveAccessLabel(permission);
 
   return [
     {
@@ -450,6 +493,13 @@ function buildSlackBlocks(
       text: {
         type: "plain_text",
         text: `Reason\n${request.reason}`,
+      },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: slackNextStep(request, decision),
       },
     },
     {
@@ -493,7 +543,7 @@ export class LiveSlackProvider implements SlackProvider {
         },
         body: JSON.stringify({
           channel: request.slackChannel,
-          text: `GitHub access request ${request.requestId ?? runId}`,
+          text: `GitHub access request ${request.requestId ?? runId}: ${decisionLabel(decision)} for ${request.githubUsername} on ${request.repository}; current access ${effectiveAccessLabel(permission)}, requested access ${request.requestedPermission}. ${slackFallbackNextStep(request, decision)}`,
           blocks: buildSlackBlocks(
             request,
             decision,

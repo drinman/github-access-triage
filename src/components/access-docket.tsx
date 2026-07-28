@@ -260,8 +260,9 @@ export function AccessDocket({
           </div>
           <div className="hero__summary">
             <p>
-              Verify effective repository access, then place one approval-ready
-              message in Slack. Human judgment stays in the loop.
+              Verify effective repository access, then send Slack a clear next
+              step and, when action is required, a direct GitHub settings link.
+              A person makes the decision.
             </p>
             <div className="readiness" data-ready={isReady}>
               <span className="readiness__signal" aria-hidden="true">
@@ -303,7 +304,7 @@ export function AccessDocket({
                 provider="slack"
                 eyebrow="Action integration"
                 title="Slack"
-                detail="Posts one approval-ready message. It does not grant GitHub permissions or retry silently."
+                detail="Posts one review summary with a clear next step and, when action is required, a direct GitHub settings link. A person decides whether to change access."
                 snapshot={snapshot.slack}
                 connectHref="/api/integrations/slack/connect"
               />
