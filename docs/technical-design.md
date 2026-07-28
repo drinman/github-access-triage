@@ -175,6 +175,7 @@ stateDiagram-v2
   Processing --> Indeterminate: delivery cannot be proved
   Completed --> Replayed: same input within 24 hours
   Partial --> Replayed: same input within 24 hours
+  Indeterminate --> Replayed: same input within 24 hours
 ```
 
 The processing record has a five-minute lease, an operation-owner ID, and an

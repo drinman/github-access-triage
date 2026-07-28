@@ -45,14 +45,23 @@ and do not retry automatically.
 
 ## Call the machine webhook
 
-For a machine-to-machine call, set the Bearer secret supplied separately,
-generate a fresh request ID, and run:
+For a machine-to-machine review, set the Bearer secret supplied separately and
+generate unique values for this run:
 
 ```bash
-export ACCESS_TRIAGE_SECRET="sent-separately"
-export REQUEST_ID="approval-$(date -u +%Y%m%dT%H%M%SZ)"
+export ACCESS_TRIAGE_SECRET="replace-with-the-privately-supplied-secret"
+export ACCEPTANCE_RUN="readme-$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 3)"
+export APPROVAL_REQUEST_ID="${ACCEPTANCE_RUN}-approval"
+export SUFFICIENT_REQUEST_ID="${ACCEPTANCE_RUN}-sufficient"
+export FAILURE_REQUEST_ID="${ACCEPTANCE_RUN}-failure"
+export MISSING_GITHUB_USER="missing-$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 3)"
+```
 
-curl --fail-with-body --silent \
+These four commands cover the main production behaviors. First, request access
+for a user with no current permission:
+
+```bash
+curl --fail-with-body --silent --show-error \
   --request POST "https://github-access-triage.vercel.app/api/access-requests" \
   --header "Authorization: Bearer $ACCESS_TRIAGE_SECRET" \
   --header "Content-Type: application/json" \
@@ -60,47 +69,110 @@ curl --fail-with-body --silent \
     \"githubUsername\": \"octocat\",
     \"repository\": \"drinman/private-access-demo\",
     \"requestedPermission\": \"write\",
-    \"reason\": \"Needs access to diagnose an integration failure\",
+    \"reason\": \"README approval-needed production check\",
     \"slackChannel\": \"C0BKXAWH6SK\",
-    \"requestId\": \"$REQUEST_ID\",
+    \"requestId\": \"$APPROVAL_REQUEST_ID\",
     \"includeDetails\": true
   }" | jq
 ```
 
-The request does four things:
+Second, check a user whose current permission is sufficient:
 
-1. Authenticates the caller.
-2. Reads `octocat`’s effective permission from GitHub.
-3. Posts one review summary to `#access-requests`, including the next step and,
-   when action is required, a direct GitHub access-settings link.
-4. Returns the decision, provider context, step results, and Slack timestamp.
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST "https://github-access-triage.vercel.app/api/access-requests" \
+  --header "Authorization: Bearer $ACCESS_TRIAGE_SECRET" \
+  --header "Content-Type: application/json" \
+  --data "{
+    \"githubUsername\": \"drinman\",
+    \"repository\": \"drinman/private-access-demo\",
+    \"requestedPermission\": \"read\",
+    \"reason\": \"README already-sufficient production check\",
+    \"slackChannel\": \"C0BKXAWH6SK\",
+    \"requestId\": \"$SUFFICIENT_REQUEST_ID\",
+    \"includeDetails\": true
+  }" | jq
+```
 
-Run the same command again without changing `REQUEST_ID`. The response includes
-`Idempotency-Replayed: true` and returns the original run without a second
-Slack post.
+Third, repeat the first request exactly. The response headers include
+`Idempotency-Replayed: true`, and the body contains the original run ID and
+Slack timestamp:
 
-## Verified production receipt
+```bash
+curl --fail-with-body --silent --show-error --dump-header /dev/stderr \
+  --request POST "https://github-access-triage.vercel.app/api/access-requests" \
+  --header "Authorization: Bearer $ACCESS_TRIAGE_SECRET" \
+  --header "Content-Type: application/json" \
+  --data "{
+    \"githubUsername\": \"octocat\",
+    \"repository\": \"drinman/private-access-demo\",
+    \"requestedPermission\": \"write\",
+    \"reason\": \"README approval-needed production check\",
+    \"slackChannel\": \"C0BKXAWH6SK\",
+    \"requestId\": \"$APPROVAL_REQUEST_ID\",
+    \"includeDetails\": true
+  }" | jq
+```
 
-The production acceptance run completed on July 28, 2026 at 11:41 AM PT.
+Fourth, send the same clean failure twice. Both responses are `404`, have
+different run IDs, and contain no Slack timestamp, showing that a pre-post
+failure releases the request ID for immediate retry:
 
-| Evidence | Observed value |
+```bash
+for attempt in 1 2; do
+  curl --silent --show-error --dump-header /dev/stderr \
+    --request POST "https://github-access-triage.vercel.app/api/access-requests" \
+    --header "Authorization: Bearer $ACCESS_TRIAGE_SECRET" \
+    --header "Content-Type: application/json" \
+    --data "{
+      \"githubUsername\": \"$MISSING_GITHUB_USER\",
+      \"repository\": \"drinman/private-access-demo\",
+      \"requestedPermission\": \"read\",
+      \"reason\": \"README clean-failure retry check\",
+      \"slackChannel\": \"C0BKXAWH6SK\",
+      \"requestId\": \"$FAILURE_REQUEST_ID\",
+      \"includeDetails\": true
+    }" | jq
+done
+```
+
+The workflow authenticates the caller, reads the person’s effective GitHub
+permission, posts one review summary to `#access-requests`, and returns a
+contextual receipt. When action is required, the Slack message includes a
+direct link to the repository’s GitHub access settings.
+
+These exact four commands were re-run successfully against production on July
+28, 2026 at 2:51 PM PT.
+
+Replay protection applies only when `requestId` is supplied: the request ID
+becomes replayable for 24 hours after Slack confirms the post or delivery is
+indeterminate, while a clean failure releases the ID for immediate reuse.
+
+## Final production acceptance
+
+Production acceptance ran on July 28, 2026 from 2:44 PM to 2:45 PM PT against
+runtime commit `663d493aa554dff7e7a3f8b730f511988f81223d`. The documentation-only
+commit that contains this evidence does not change the accepted runtime.
+
+| Check | Production evidence |
 | --- | --- |
-| GitHub user | `octocat` |
-| Repository | `drinman/private-access-demo` |
-| Requested permission | `write` |
-| Effective permission | `none` |
-| Decision | `approval_needed` |
-| Slack message timestamp | `1785264089.159979` |
-| Run ID | `02780157-bfd8-4fd8-a1c1-3ec6df6b85f3` |
-| Request ID | `manual-handoff-00f48225-eabb-46f3-bd9b-fdff50b3b6da` |
-| Replay | Same run ID and Slack timestamp, with no duplicate post |
-| Public status | `ready`, with GitHub and Slack connected |
+| Browser runner | Signed admin session completed `approval_needed` and rendered receipt `05a2c22a-34fc-4468-a3dc-e149067e1766` |
+| `approval_needed` | `octocat` requested `write`; Slack posted the manual handoff and GitHub settings link |
+| `already_sufficient` | `drinman` requested `read`; GitHub returned `admin`; Slack said `No action required` without the settings link |
+| `manual_review` | Not manufactured live: this personal-account repository cannot provision an organization custom role; permission and workflow unit tests cover the branch |
+| Idempotent replay | Same request ID returned the original run ID and Slack timestamp with `Idempotency-Replayed: true`; Slack contained one matching message |
+| Failure then retry | The same nonexistent-user request returned two `404 GITHUB_USER_NOT_FOUND` receipts with different run IDs and no Slack post |
+| Authentication and validation | Missing Bearer authentication returned `401`; malformed JSON returned `400` |
+| Public readiness | `/api/status` returned `ready`, both providers connected, and non-null `lastSuccessfulRunAt` |
 
-![Verified Slack manual approval handoff](docs/slack-approval.jpg)
+The production repository allowlist also returned
+`422 GITHUB_REPOSITORY_NOT_ALLOWED` for a different repository before Redis or
+either provider was called. The provider-level
+`GITHUB_REPOSITORY_NOT_ACCESSIBLE` branch remains covered by unit tests.
 
-The same production pass also confirmed `401` for missing authentication, `400`
-for an invalid payload, and `404 GITHUB_REPOSITORY_NOT_ACCESSIBLE` without a
-Slack post for an inaccessible repository.
+See the [redacted receipts and final screenshots](docs/acceptance/final-production-acceptance.md).
+
+![Final Slack acceptance evidence](docs/acceptance/slack-final-acceptance.png)
 
 ## Architecture
 
@@ -297,13 +369,14 @@ unknown custom role produces `manual_review`; the app does not guess its rank.
 | --- | --- | --- |
 | `completed` | Slack confirmed the post and finalization completed | Store the receipt |
 | `failed` | No Slack message was confirmed | Fix the reported cause, then retry |
-| `partial_failure` | Slack posted, but noncritical finalization failed | Do not create a new request ID |
+| `partial_failure` | Slack posted, but noncritical finalization failed | Do not retry; replay exists only if `requestId` was supplied |
 | `indeterminate` | Delivery or replay protection could not be confirmed | Do not retry automatically |
 
-Supplying `requestId` enables a five-minute processing lease and a 24-hour
-replay result. Without it, the request can still run, but the response states
-that duplicate protection was not requested and a retry may duplicate the
-Slack post.
+Replay protection applies only when `requestId` is supplied: the request ID
+becomes replayable for 24 hours after Slack confirms the post or delivery is
+indeterminate, while a clean failure releases the ID for immediate reuse. The
+five-minute processing lease protects an in-flight request. Without a request
+ID, a retry may duplicate the Slack post.
 
 Useful error codes include:
 
@@ -343,13 +416,16 @@ in Vercel Firewall; this take-home does not claim they are configured.
 
 Production acceptance on July 28, 2026 confirmed:
 
-1. The public URL and `/api/status` work without a Vercel login.
-2. GitHub and Slack report `connected`.
-3. A live GitHub read produced an approval-needed decision.
-4. Slack accepted the manual approval handoff in `#access-requests`.
-5. Replaying the same request returned the original run without another post.
-6. Authentication, validation, and inaccessible-repository failures returned
-   contextual errors.
+1. A complete signed-in browser run rendered its production receipt.
+2. An approval-needed GitHub read posted the manual handoff and settings link.
+3. An already-sufficient GitHub read posted the no-action message without that
+   link.
+4. The custom-role `manual_review` branch is covered by unit tests and is not
+   misrepresented as a live personal-repository result.
+5. A replay returned the original run and Slack timestamp without another post.
+6. A clean failure released its request ID and reran immediately.
+7. Missing authentication returned `401`, and malformed JSON returned `400`.
+8. `/api/status` returned `ready` with a non-null `lastSuccessfulRunAt`.
 
 Repository checks:
 
@@ -361,10 +437,10 @@ pnpm build
 pnpm audit --prod
 ```
 
-The local gate covers the browser and machine authentication boundaries,
-workflow receipts, provider behavior, typecheck, lint, the production build,
-and the production dependency audit. `pnpm audit --prod` reports no known
-vulnerabilities.
+The 127-test local gate covers the browser and machine authentication
+boundaries, workflow receipts, provider behavior, typecheck, lint, the
+production build, and the production dependency audit. `pnpm audit --prod`
+reports no known vulnerabilities.
 
 A full development dependency audit still reports
 `GHSA-mh99-v99m-4gvg` through `eslint > minimatch > brace-expansion`. That path
