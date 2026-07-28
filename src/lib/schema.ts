@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-import type { NormalizedAccessRequest } from "@/lib/domain";
+import type {
+  NormalizedAccessRequest,
+  RequestedPermission,
+} from "@/lib/domain";
 import { REQUESTED_PERMISSIONS } from "@/lib/domain";
 import { AppError } from "@/lib/errors";
 
@@ -15,21 +18,60 @@ function hasSafeRepositorySegments(repository: string): boolean {
     .every((segment) => segment !== "." && segment !== "..");
 }
 
+const githubUsernameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(39)
+  .regex(githubUsernamePattern);
+const repositorySchema = z
+  .string()
+  .trim()
+  .regex(repositoryPattern)
+  .refine(hasSafeRepositorySegments);
+const requestedPermissionSchema = z.enum(REQUESTED_PERMISSIONS);
+const reasonSchema = z.string().trim().min(1).max(500);
+const slackChannelSchema = z.string().trim().regex(slackChannelPattern);
+
 const accessRequestSchema = z
   .object({
-    githubUsername: z.string().trim().min(1).max(39).regex(githubUsernamePattern),
-    repository: z
-      .string()
-      .trim()
-      .regex(repositoryPattern)
-      .refine(hasSafeRepositorySegments),
-    requestedPermission: z.enum(REQUESTED_PERMISSIONS),
-    reason: z.string().trim().min(1).max(500),
-    slackChannel: z.string().trim().regex(slackChannelPattern),
+    githubUsername: githubUsernameSchema,
+    repository: repositorySchema,
+    requestedPermission: requestedPermissionSchema,
+    reason: reasonSchema,
+    slackChannel: slackChannelSchema,
     requestId: z.string().trim().min(1).max(100).optional(),
     includeDetails: z.boolean().optional().default(false),
   })
   .strict();
+
+const adminAccessRequestSchema = z
+  .object({
+    githubUsername: githubUsernameSchema,
+    requestedPermission: requestedPermissionSchema,
+    reason: reasonSchema,
+    submissionId: z.string().uuid(),
+  })
+  .strict();
+
+const configuredAccessTargetsSchema = z
+  .object({
+    repository: repositorySchema,
+    slackChannel: slackChannelSchema,
+  })
+  .strict();
+
+export type NormalizedAdminAccessRequest = {
+  githubUsername: string;
+  requestedPermission: RequestedPermission;
+  reason: string;
+  submissionId: string;
+};
+
+export type ConfiguredAccessTargets = {
+  repository: string;
+  slackChannel: string;
+};
 
 export function parseAccessRequest(value: unknown): NormalizedAccessRequest {
   const parsed = accessRequestSchema.safeParse(value);
@@ -45,5 +87,42 @@ export function parseAccessRequest(value: unknown): NormalizedAccessRequest {
     ...parsed.data,
     githubUsername: parsed.data.githubUsername.toLowerCase(),
     repository: parsed.data.repository.toLowerCase(),
+  };
+}
+
+export function parseAdminAccessRequest(
+  value: unknown,
+): NormalizedAdminAccessRequest {
+  const parsed = adminAccessRequestSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "The request body did not match the admin access-check contract.",
+      400,
+    );
+  }
+
+  return {
+    ...parsed.data,
+    githubUsername: parsed.data.githubUsername.toLowerCase(),
+    submissionId: parsed.data.submissionId.toLowerCase(),
+  };
+}
+
+export function parseConfiguredAccessTargets(
+  value: unknown,
+): ConfiguredAccessTargets {
+  const parsed = configuredAccessTargetsSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new AppError(
+      "CONFIGURATION_ERROR",
+      "The configured demo repository or Slack channel is invalid.",
+      500,
+    );
+  }
+
+  return {
+    repository: parsed.data.repository.toLowerCase(),
+    slackChannel: parsed.data.slackChannel,
   };
 }

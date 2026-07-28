@@ -1,15 +1,10 @@
 import { NextResponse } from "next/server";
 
+import { runConfiguredAccessRequest } from "@/lib/access-request-service";
 import { verifyBearerHeader } from "@/lib/crypto";
 import { requireEnv } from "@/lib/env";
 import { AppError, toAppError } from "@/lib/errors";
-import {
-  LiveGitHubProvider,
-  LiveSlackProvider,
-} from "@/lib/providers";
 import { parseAccessRequest } from "@/lib/schema";
-import { getStore } from "@/lib/store";
-import { executeAccessRequest } from "@/lib/workflow";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,43 +72,12 @@ export async function POST(request: Request): Promise<NextResponse> {
     return errorResponse(toAppError(error));
   }
 
-  let demoRepository: string;
-  let demoSlackChannel: string;
+  let result;
   try {
-    demoRepository = requireEnv("DEMO_GITHUB_REPOSITORY")
-      .trim()
-      .toLowerCase();
-    demoSlackChannel = requireEnv("DEMO_SLACK_CHANNEL_ID").trim();
+    result = await runConfiguredAccessRequest(input);
   } catch (error) {
     return errorResponse(toAppError(error));
   }
-
-  if (input.repository !== demoRepository) {
-    return errorResponse(
-      new AppError(
-        "GITHUB_REPOSITORY_NOT_ALLOWED",
-        "This deployment is limited to its configured demo repository.",
-        422,
-      ),
-    );
-  }
-
-  if (input.slackChannel !== demoSlackChannel) {
-    return errorResponse(
-      new AppError(
-        "SLACK_CHANNEL_NOT_ALLOWED",
-        "This deployment is limited to its configured demo Slack channel.",
-        422,
-      ),
-    );
-  }
-
-  const store = getStore();
-  const result = await executeAccessRequest(input, {
-    store,
-    github: new LiveGitHubProvider(store),
-    slack: new LiveSlackProvider(store),
-  });
 
   return NextResponse.json(result.receipt, {
     status: result.httpStatus,

@@ -15,18 +15,38 @@ grants, changes, or revokes access.
 | --- | --- |
 | Production | https://github-access-triage.vercel.app |
 | Public readiness | https://github-access-triage.vercel.app/api/status |
-| Trigger | `POST /api/access-requests` |
+| Human demo | Sign in, then use **Run access check** |
+| Machine API | `POST /api/access-requests` |
 | Repository | `drinman/private-access-demo` |
 | Slack destination | `#access-requests` (`C0BKXAWH6SK`) |
 
-The trigger requires a rotatable Bearer secret sent separately with the
-submission. The admin password stays private and is only used to reconnect
-GitHub or Slack.
+The admin password is shared privately with the reviewer. It opens the
+human-operated browser demo and the provider setup controls. The public webhook
+is a separate machine contract protected by a rotatable Bearer secret.
 
-## Trigger it in 60 seconds
+## Run it in the browser
 
-Set the secret supplied with the submission, generate a fresh request ID, and
-run:
+1. Open the production URL and enter the admin password shared privately with
+   you.
+2. Confirm GitHub and Slack are connected.
+3. Enter the GitHub username, requested permission, and reason.
+4. Select **Run access check** once.
+
+This is a real workflow run, not a preview. Each new run reads GitHub and makes
+one Slack post attempt to the configured channel. GitHub remains read-only, the
+Slack app still has only `chat:write`, and a person makes any access change. The
+browser sends same-origin JSON to `POST /api/admin/access-requests` under the
+signed admin session. The server injects the configured repository and Slack
+channel; the browser cannot choose another target.
+
+The result card shows the GitHub decision, Slack delivery state, and execution
+receipt. If delivery is uncertain, inspect `#access-requests` for the request ID
+and do not retry automatically.
+
+## Call the machine webhook
+
+For a machine-to-machine call, set the Bearer secret supplied separately,
+generate a fresh request ID, and run:
 
 ```bash
 export ACCESS_TRIAGE_SECRET="sent-separately"
@@ -86,7 +106,8 @@ Slack post for an inaccessible repository.
 
 ```mermaid
 flowchart LR
-  C["Authenticated caller"] -->|"POST request"| A["Next.js workflow"]
+  H["Signed-in reviewer"] -->|"same-origin JSON"| A["Next.js workflow"]
+  C["Bearer-authenticated caller"] -->|"webhook JSON"| A
   A -->|"short-lived installation token"| G["GitHub API"]
   G -->|"effective permission"| A
   A -->|"one chat.postMessage call"| S["Slack API"]
@@ -146,8 +167,10 @@ openssl rand -base64 32
 ```
 
 Use those values, in order, for `ADMIN_PASSWORD`, `SESSION_SECRET`,
-`WEBHOOK_SECRET`, and `TOKEN_ENCRYPTION_KEY`. Do not commit or paste them into
-an issue, pull request, or chat.
+`WEBHOOK_SECRET`, and `TOKEN_ENCRYPTION_KEY`. Do not commit them. Share only the
+admin password and, when the machine API is being reviewed, the webhook secret
+through a private channel. Provider credentials, the encryption key, and
+Upstash credentials remain deployment secrets.
 
 ### Configure the GitHub App
 
@@ -205,10 +228,22 @@ Start the app:
 pnpm dev
 ```
 
-Open `http://localhost:3000`, sign in with `ADMIN_PASSWORD`, then connect GitHub
-and Slack.
+Open `http://localhost:3000`, sign in with `ADMIN_PASSWORD`, connect GitHub and
+Slack, then use the browser runner or the machine API.
 
 ## API contract
+
+### Browser runner
+
+`POST /api/admin/access-requests` is the human demo path. It requires the signed
+admin session established at login and accepts same-origin JSON only. The
+browser supplies the request details and a stable submission ID. The server
+injects `DEMO_GITHUB_REPOSITORY`, `DEMO_SLACK_CHANNEL_ID`, and detailed receipt
+mode before calling the same workflow used by the public API.
+
+The runner disables concurrent submission and does not automatically retry a
+Slack write. A timeout can hide a successful Slack post, so an uncertain receipt
+requires a manual channel check.
 
 ### Readiness
 
@@ -221,9 +256,11 @@ curl --silent \
 Otherwise it is `degraded`. The endpoint is public, read-only, uncached, and
 does not expose credentials, identities, or request content.
 
-### Trigger input
+### Machine webhook input
 
-The JSON object is strict. Unknown fields and incorrect types are rejected.
+`POST /api/access-requests` remains the machine contract. It requires the
+rotatable Bearer secret. Its JSON object is strict; unknown fields and incorrect
+types are rejected.
 
 | Field | Rule |
 | --- | --- |
@@ -292,9 +329,9 @@ The current scope does not include:
 - KMS-backed key management
 - per-caller rate limits inside the application
 
-The Bearer secret controls the public trigger. Custom per-source rate limits
-would belong in Vercel Firewall; this take-home does not claim they are
-configured.
+The signed admin session controls the human browser runner. The Bearer secret
+controls the public machine trigger. Custom per-source rate limits would belong
+in Vercel Firewall; this take-home does not claim they are configured.
 
 ## Verification
 
@@ -318,9 +355,10 @@ pnpm build
 pnpm audit --prod
 ```
 
-The July 28, 2026 local gate passed 81 tests across 9 files, typecheck, lint,
-the production build, and the production dependency audit. `pnpm audit --prod`
-reports no known vulnerabilities.
+The local gate covers the browser and machine authentication boundaries,
+workflow receipts, provider behavior, typecheck, lint, the production build,
+and the production dependency audit. `pnpm audit --prod` reports no known
+vulnerabilities.
 
 A full development dependency audit still reports
 `GHSA-mh99-v99m-4gvg` through `eslint > minimatch > brace-expansion`. That path
@@ -340,6 +378,7 @@ dispatches.
 5. Redeploy so the new environment variables reach the runtime.
 6. Connect both providers and confirm `/api/status` returns `ready`.
 
-Keep `ADMIN_PASSWORD`, provider credentials, `TOKEN_ENCRYPTION_KEY`, and the
-Upstash token private. Send only the public repository URL, production URL, and
-rotatable `WEBHOOK_SECRET` with the submission.
+Share the admin password privately with the reviewer. If the machine contract is
+also being exercised, share its rotatable `WEBHOOK_SECRET` separately. Keep
+provider credentials, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, and Upstash
+credentials private to the deployment.

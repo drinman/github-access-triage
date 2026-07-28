@@ -7,14 +7,21 @@ short reviewer path in the README.
 
 ```mermaid
 sequenceDiagram
-  participant Caller
+  participant Reviewer
+  participant Machine
   participant App
   participant Redis
   participant GitHub
   participant Slack
 
-  Caller->>App: POST /api/access-requests
-  App->>App: Authenticate and validate target
+  alt Human browser demo
+    Reviewer->>App: POST /api/admin/access-requests
+    App->>App: Verify signed session and same origin
+    App->>App: Inject configured repository and channel
+  else Machine contract
+    Machine->>App: POST /api/access-requests
+    App->>App: Verify Bearer secret and allowlisted target
+  end
   App->>Redis: Acquire owner-scoped request lease
   App->>Redis: Read verified provider connections
   App->>GitHub: Mint repository-scoped installation token
@@ -23,11 +30,43 @@ sequenceDiagram
   Slack-->>App: Confirm message timestamp
   App->>Redis: Store replay-safe receipt
   App->>Redis: Update last successful run
-  App-->>Caller: Contextual execution receipt
+  alt Human browser demo
+    App-->>Reviewer: Contextual execution receipt
+  else Machine contract
+    App-->>Machine: Contextual execution receipt
+  end
 ```
 
 The app calls Slack at most once during a workflow attempt. It does not retry a
 Slack write because a transport timeout can hide a successful post.
+
+## Trigger surfaces
+
+### Human browser runner
+
+The admin console is the human-operated demo path. Login establishes a signed,
+HTTP-only admin session. The runner sends same-origin JSON to
+`POST /api/admin/access-requests`; the server checks the session and request
+origin before parsing the body.
+
+The browser supplies the requester, requested permission, reason, and stable
+submission ID. The server injects the configured repository, configured Slack
+channel, and detailed receipt mode. Client input therefore cannot turn the
+runner into a general repository lookup or Slack posting surface.
+
+Selecting **Run access check** authorizes one real workflow run and one Slack
+post attempt. The browser disables concurrent submission. Neither the route nor
+the client automatically retries uncertain Slack delivery.
+
+### Machine webhook
+
+`POST /api/access-requests` remains the machine-to-machine contract. It uses a
+rotatable Bearer secret and the strict parameterized JSON schema. Repository and
+channel values must still match the configured production targets.
+
+Both surfaces call the same validation, permission, idempotency, provider, and
+receipt logic. The browser route does not call the public route and never
+exposes the Bearer secret.
 
 ## Provider connections
 
@@ -116,8 +155,9 @@ reviews the context and makes any access decision or change in GitHub.
 
 ## Idempotency state machine
 
-`requestId` is optional to preserve a small, convenient HTTP contract.
-Supplying one enables duplicate protection.
+`requestId` is optional in the machine contract to preserve a small, convenient
+HTTP interface. Supplying one enables duplicate protection. The browser runner
+always supplies a stable generated request ID for its submission.
 
 The input fingerprint covers normalized business fields. It excludes
 `requestId` and `includeDetails`. A compact replay and a detailed replay are
@@ -181,7 +221,8 @@ A timeout, network error after request transmission, or malformed successful
 Slack response cannot prove whether Slack accepted the post. The app returns
 `SLACK_DELIVERY_UNKNOWN`, marks the result as ambiguous, and leaves an acquired
 processing record to expire for five minutes. The caller must not retry
-automatically.
+automatically. The browser tells the reviewer to inspect the configured Slack
+channel for the request ID before taking any further action.
 
 ### Unconfirmed replay protection
 
@@ -228,6 +269,8 @@ message itself from becoming the source of authorization.
 ## Security boundaries
 
 - The trigger compares its Bearer secret in constant time.
+- The browser runner requires a signed admin session and same-origin JSON.
+- Browser-supplied input cannot select the repository or Slack channel.
 - Admin sessions and OAuth state use HMAC signatures.
 - OAuth state is short-lived and single-use.
 - GitHub user OAuth uses PKCE.
@@ -237,11 +280,17 @@ message itself from becoming the source of authorization.
 - Provider responses are shape-checked before the app trusts their contents.
 - Error responses do not include raw provider tokens or secrets.
 
+The admin password may be shared privately with an authorized reviewer so they
+can use the human demo. Provider credentials, `SESSION_SECRET`,
+`TOKEN_ENCRYPTION_KEY`, and Upstash credentials remain private to the
+deployment and are never rendered in the browser.
+
 ## Known limits
 
-This deployment is intentionally single tenant. It has no automatic GitHub
-write, Slack buttons, job queue, automatic provider retry, run-history UI,
-application-level per-caller rate limiter, or KMS integration.
+This deployment is intentionally single tenant. It has a human browser runner
+but no automatic GitHub write, Slack buttons, job queue, automatic provider
+retry, run-history UI, application-level per-caller rate limiter, or KMS
+integration.
 
 The five-minute processing lease is recovery state, not a global exactly-once
 guarantee. A process can still fail at the boundary between Slack accepting a

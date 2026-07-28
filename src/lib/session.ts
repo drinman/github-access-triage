@@ -5,6 +5,7 @@ import { cookies } from "next/headers";
 
 import {
   signToken,
+  type SignedTokenPayload,
   timingSafeStringEqual,
   verifySignedToken,
 } from "@/lib/crypto";
@@ -12,12 +13,41 @@ import { requireEnv } from "@/lib/env";
 
 export const ADMIN_COOKIE = "access_triage_admin";
 const SESSION_LIFETIME_SECONDS = 8 * 60 * 60;
+const ADMIN_SESSION_KEYS = new Set([
+  "sessionId",
+  "issuedAt",
+  "expiresAt",
+]);
+const UUID_V4_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type AdminSession = {
   sessionId: string;
   issuedAt: number;
   expiresAt: number;
 };
+
+function isAdminSession(payload: SignedTokenPayload): payload is AdminSession {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    return false;
+  }
+
+  const keys = Object.keys(payload);
+  return (
+    keys.length === ADMIN_SESSION_KEYS.size &&
+    keys.every((key) => ADMIN_SESSION_KEYS.has(key)) &&
+    typeof payload.sessionId === "string" &&
+    UUID_V4_PATTERN.test(payload.sessionId) &&
+    Number.isSafeInteger(payload.issuedAt) &&
+    Number.isSafeInteger(payload.expiresAt) &&
+    payload.issuedAt >= 0 &&
+    payload.expiresAt === payload.issuedAt + SESSION_LIFETIME_SECONDS
+  );
+}
 
 export function createAdminSession(now = Date.now()): string {
   const issuedAt = Math.floor(now / 1000);
@@ -38,10 +68,11 @@ export function verifyAdminPassword(supplied: string): boolean {
 export function readAdminSessionToken(
   token: string | undefined,
 ): AdminSession | null {
-  return verifySignedToken<AdminSession>(
+  const payload = verifySignedToken<SignedTokenPayload>(
     token,
     requireEnv("SESSION_SECRET"),
   );
+  return payload && isAdminSession(payload) ? payload : null;
 }
 
 export async function getAdminSession(): Promise<AdminSession | null> {

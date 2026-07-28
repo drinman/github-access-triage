@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { AccessCheckPanel } from "@/components/access-check-panel";
+
 export type ConnectionState = "connected" | "disconnected" | "invalid";
 
 export type IntegrationSnapshot = {
@@ -16,7 +18,9 @@ export type DocketSnapshot = {
 
 type AccessDocketProps = {
   snapshot: DocketSnapshot;
+  demoRepository?: string;
   demoChannelId?: string;
+  slackTeamId?: string;
   notice?: {
     tone: "success" | "error";
     message: string;
@@ -208,7 +212,9 @@ function Safeguard({
 
 export function AccessDocket({
   snapshot,
+  demoRepository = "Set DEMO_GITHUB_REPOSITORY",
   demoChannelId = "Set in README",
+  slackTeamId = "",
   notice,
 }: AccessDocketProps) {
   const isReady =
@@ -312,6 +318,20 @@ export function AccessDocket({
 
             <FlowStep
               number="03"
+              title="Run the live handoff"
+              description="Use the admin session to exercise the same governed workflow without exposing its Bearer secret."
+            >
+              <AccessCheckPanel
+                githubReady={snapshot.github.status === "connected"}
+                slackReady={snapshot.slack.status === "connected"}
+                repository={demoRepository}
+                slackChannel={demoChannelId}
+                slackTeamId={slackTeamId}
+              />
+            </FlowStep>
+
+            <FlowStep
+              number="04"
               title="Expose the governed trigger"
               description="Once both connections are healthy, authenticated callers can submit access requests."
               isLast
@@ -332,8 +352,8 @@ export function AccessDocket({
                     <span>Demo channel</span>
                     <strong>{demoChannelId}</strong>
                     <p>
-                      Invite the bot before testing another channel. Slack membership
-                      errors return an actionable receipt.
+                      This deployment posts only to this configured channel. The
+                      bot must already be a member.
                     </p>
                   </div>
 
@@ -378,7 +398,7 @@ export function AccessDocket({
               <Safeguard
                 number="01"
                 title="Authenticated trigger"
-                copy="A timing-safe Bearer check protects the public workflow endpoint."
+                copy="A signed admin session protects the console; a timing-safe Bearer secret protects the public trigger."
               />
               <Safeguard
                 number="02"

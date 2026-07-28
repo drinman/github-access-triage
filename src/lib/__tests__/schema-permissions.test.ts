@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { AppError } from "@/lib/errors";
 import { decideAccess, interpretPermission } from "@/lib/permissions";
-import { parseAccessRequest } from "@/lib/schema";
+import {
+  parseAccessRequest,
+  parseAdminAccessRequest,
+  parseConfiguredAccessTargets,
+} from "@/lib/schema";
 
 const valid = {
   githubUsername: " Test-User ",
@@ -50,6 +54,62 @@ describe("request parsing", () => {
       ).toBe(repository);
     },
   );
+});
+
+describe("admin request parsing", () => {
+  const adminRequest = {
+    githubUsername: " Test-User ",
+    requestedPermission: "write",
+    reason: " Diagnose the issue ",
+    submissionId: "550E8400-E29B-41D4-A716-446655440000",
+  };
+
+  it("strictly validates and normalizes the admin-only fields", () => {
+    expect(parseAdminAccessRequest(adminRequest)).toEqual({
+      githubUsername: "test-user",
+      requestedPermission: "write",
+      reason: "Diagnose the issue",
+      submissionId: "550e8400-e29b-41d4-a716-446655440000",
+    });
+  });
+
+  it.each([
+    { ...adminRequest, submissionId: "not-a-uuid" },
+    { ...adminRequest, repository: "owner/repo" },
+    { ...adminRequest, slackChannel: "C0123456789" },
+    { ...adminRequest, includeDetails: true },
+    { ...adminRequest, unknown: true },
+  ])("rejects invalid or caller-controlled fields", (input) => {
+    expect(() => parseAdminAccessRequest(input)).toThrow(AppError);
+  });
+});
+
+describe("configured target parsing", () => {
+  it("normalizes a valid configured repository", () => {
+    expect(
+      parseConfiguredAccessTargets({
+        repository: " Owner/Repo ",
+        slackChannel: "C0123456789",
+      }),
+    ).toEqual({
+      repository: "owner/repo",
+      slackChannel: "C0123456789",
+    });
+  });
+
+  it("reports invalid target configuration as a server error", () => {
+    expect(() =>
+      parseConfiguredAccessTargets({
+        repository: "owner/..",
+        slackChannel: "C0123456789",
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: "CONFIGURATION_ERROR",
+        httpStatus: 500,
+      }),
+    );
+  });
 });
 
 describe("permission decisions", () => {

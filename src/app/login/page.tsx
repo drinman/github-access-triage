@@ -30,10 +30,11 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
         </Link>
 
         <div className="login-intro__copy">
-          <p className="eyebrow eyebrow--light">Restricted setup surface</p>
+          <p className="eyebrow eyebrow--light">Restricted reviewer surface</p>
           <h1>Keep the workflow connected. Keep the boundary explicit.</h1>
           <p>
-            This console changes runtime connections for GitHub and Slack. The public
+            Use the human demo to inspect the fixed GitHub target and send one
+            review handoff to the configured Slack channel. The public machine
             trigger remains separate and independently authenticated.
           </p>
         </div>
@@ -47,15 +48,20 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             <dt>Provider tokens</dt>
             <dd>Never rendered here</dd>
           </div>
+          <div>
+            <dt>Demo targets</dt>
+            <dd>Injected by the server</dd>
+          </div>
         </dl>
       </section>
 
       <section className="login-panel" aria-labelledby="login-heading">
         <div className="login-panel__inner">
           <p className="folio">ADMIN / 01</p>
-          <h2 id="login-heading">Open the setup console</h2>
+          <h2 id="login-heading">Open the admin console</h2>
           <p className="login-panel__lede">
-            Enter the shared admin password to connect or replace an integration.
+            Enter the admin password shared privately with you to verify
+            connections or run the browser demo.
           </p>
 
           {hasError ? (
@@ -76,18 +82,20 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                 autoFocus
                 aria-describedby="password-note"
               />
-              <p id="password-note">The password is not stored in this browser.</p>
+              <p id="password-note">
+                The app uses this password only to establish a signed admin session.
+              </p>
             </div>
 
             <button className="button button--primary button--wide" type="submit">
-              Continue to setup
+              Continue to admin console
               <span aria-hidden="true">↗</span>
             </button>
           </form>
 
           <div className="login-panel__footer">
             <span className="lock-indicator" aria-hidden="true" />
-            <span>Private administration</span>
+            <span>Private reviewer access</span>
             <Link href="/api/status">View public status</Link>
           </div>
         </div>

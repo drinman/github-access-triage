@@ -59,9 +59,14 @@ export default async function Home({ searchParams }: HomeProps) {
     <AccessDocket
       snapshot={snapshot}
       notice={notice}
+      demoRepository={
+        process.env.DEMO_GITHUB_REPOSITORY ??
+        "Set DEMO_GITHUB_REPOSITORY"
+      }
       demoChannelId={
         process.env.DEMO_SLACK_CHANNEL_ID ?? "Set DEMO_SLACK_CHANNEL_ID"
       }
+      slackTeamId={slack?.teamId ?? ""}
     />
   );
 }
