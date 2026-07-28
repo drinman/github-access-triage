@@ -338,9 +338,3 @@ dispatches.
 Keep `ADMIN_PASSWORD`, provider credentials, `TOKEN_ENCRYPTION_KEY`, and the
 Upstash token private. Send only the public repository URL, production URL, and
 rotatable `WEBHOOK_SECRET` with the submission.
-
-## AI disclosure
-
-I used OpenAI Codex for planning, implementation, tests, documentation, and
-review. I reviewed the resulting code and own the design decisions and final
-submission.
