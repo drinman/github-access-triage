@@ -49,8 +49,8 @@ For a machine-to-machine review, set the Bearer secret supplied separately and
 generate unique values for this run:
 
 ```bash
-export ACCESS_TRIAGE_SECRET="replace-with-the-privately-supplied-secret"
-export ACCEPTANCE_RUN="readme-$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 3)"
+export ACCESS_TRIAGE_SECRET='<from this email>'
+export ACCEPTANCE_RUN="neal-$(date -u +%s)-$(openssl rand -hex 3)"
 export APPROVAL_REQUEST_ID="${ACCEPTANCE_RUN}-approval"
 export SUFFICIENT_REQUEST_ID="${ACCEPTANCE_RUN}-sufficient"
 export FAILURE_REQUEST_ID="${ACCEPTANCE_RUN}-failure"
@@ -75,6 +75,10 @@ curl --fail-with-body --silent --show-error \
     \"includeDetails\": true
   }" | jq
 ```
+
+Re-running with the same `requestId` within 24 hours returns the original
+receipt with an `Idempotency-Replayed: true` header instead of posting again;
+use a fresh ID for a fresh run.
 
 Second, check a user whose current permission is sufficient:
 
