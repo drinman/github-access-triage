@@ -27,17 +27,9 @@ import type {
 import type { KeyValueStore } from "@/lib/store";
 
 export type WorkflowResult = {
-  receipt: PublicReceipt | IndeterminateDeliveryReceipt;
+  receipt: PublicReceipt;
   httpStatus: number;
   replayed: boolean;
-};
-
-export type IndeterminateDeliveryReceipt = Omit<
-  InternalReceipt,
-  "status" | "steps"
-> & {
-  status: "indeterminate";
-  steps?: ReceiptStep[];
 };
 
 export type WorkflowDependencies = {
@@ -330,7 +322,7 @@ export async function executeAccessRequest(
         provisional = null;
       }
       if (!provisional) {
-        const unconfirmedReceipt: IndeterminateDeliveryReceipt = {
+        const unconfirmedReceipt: InternalReceipt = {
           ...partialReceipt,
           status: "indeterminate",
           summary:
@@ -350,11 +342,11 @@ export async function executeAccessRequest(
             },
           ],
         };
-        if (!request.includeDetails) {
-          delete unconfirmedReceipt.steps;
-        }
         return {
-          receipt: unconfirmedReceipt,
+          receipt: projectReceipt(
+            unconfirmedReceipt,
+            request.includeDetails,
+          ),
           httpStatus: 200,
           replayed: false,
         };
@@ -432,7 +424,7 @@ export async function executeAccessRequest(
       steps[2].detail = "Slack was not called.";
     }
 
-    const receipt = createFailureReceipt({
+    const failureReceipt = createFailureReceipt({
       request,
       runId,
       requestedAt,
@@ -441,8 +433,61 @@ export async function executeAccessRequest(
       permission,
       steps,
     });
+
+    if (appError.ambiguousDelivery) {
+      const indeterminateReceipt: InternalReceipt = {
+        ...failureReceipt,
+        status: "indeterminate",
+        slack: {
+          ...failureReceipt.slack,
+          posted: null,
+        },
+      };
+
+      if (request.requestId && ownedRecord) {
+        indeterminateReceipt.steps[3] = {
+          name: "receipt",
+          status: "completed",
+          detail:
+            "An indeterminate delivery result was stored for 24 hours. Retrying this requestId will not post to Slack again.",
+        };
+
+        let stored: ReplayableRecord | null = null;
+        try {
+          stored = await storeReplayableReceipt(
+            dependencies.store,
+            request.requestId,
+            ownedRecord,
+            fingerprint,
+            operationId,
+            indeterminateReceipt,
+          );
+        } catch {
+          stored = null;
+        }
+
+        if (!stored) {
+          indeterminateReceipt.steps[3] = {
+            name: "receipt",
+            status: "failed",
+            detail:
+              "The indeterminate delivery result could not be stored for replay.",
+          };
+        }
+      }
+
+      return {
+        receipt: projectReceipt(
+          indeterminateReceipt,
+          request.includeDetails,
+        ),
+        httpStatus: appError.httpStatus,
+        replayed: false,
+      };
+    }
+
     return {
-      receipt: projectReceipt(receipt, request.includeDetails),
+      receipt: projectReceipt(failureReceipt, request.includeDetails),
       httpStatus: appError.httpStatus,
       replayed: false,
     };

@@ -31,7 +31,7 @@ export type AdminAccessReceipt = {
   };
   slack?: {
     channel: string;
-    posted: boolean;
+    posted: boolean | null;
     messageTs: string | null;
   };
   error?: {

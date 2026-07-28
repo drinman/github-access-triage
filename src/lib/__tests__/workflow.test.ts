@@ -8,6 +8,7 @@ import type {
 } from "@/lib/domain";
 import { STORE_KEYS } from "@/lib/domain";
 import { AppError } from "@/lib/errors";
+import { REPLAY_TTL_SECONDS } from "@/lib/idempotency";
 import type {
   GitHubProvider,
   SlackProvider,
@@ -50,8 +51,8 @@ const slackConnection: SlackConnection = {
   lastVerifiedAt: "2026-07-27T00:00:00.000Z",
 };
 
-async function connectedStore(): Promise<MemoryStore> {
-  const store = new MemoryStore();
+async function connectedStore(now?: () => number): Promise<MemoryStore> {
+  const store = new MemoryStore(now);
   await store.set(STORE_KEYS.githubConnection, githubConnection);
   await store.set(STORE_KEYS.slackConnection, slackConnection);
   return store;
@@ -235,37 +236,114 @@ describe("workflow", () => {
     expect(result.receipt.outcome).toBe("manual_review");
   });
 
-  it("holds an ambiguous Slack delivery until the processing TTL expires", async () => {
-    const store = await connectedStore();
-    const first = await executeAccessRequest(
-      request,
-      fixedDependencies(
-        store,
-        providers({
-          slackError: new AppError(
-            "SLACK_DELIVERY_UNKNOWN",
-            "Delivery could not be confirmed",
-            502,
-            { ambiguousDelivery: true },
-          ),
-        }),
+  it("stores an ambiguous Slack delivery as a 24-hour indeterminate replay", async () => {
+    let clock = 0;
+    const store = await connectedStore(() => clock);
+    const firstProviders = providers({
+      slackError: new AppError(
+        "SLACK_DELIVERY_UNKNOWN",
+        "Delivery could not be confirmed",
+        502,
+        { ambiguousDelivery: true },
       ),
+    });
+    const first = await executeAccessRequest(
+      { ...request, includeDetails: true },
+      fixedDependencies(store, firstProviders),
     );
-    expect(first.receipt).toMatchObject({
-      status: "failed",
-      error: { code: "SLACK_DELIVERY_UNKNOWN" },
+    expect(first).toMatchObject({
+      httpStatus: 502,
+      replayed: false,
+      receipt: {
+        status: "indeterminate",
+        error: { code: "SLACK_DELIVERY_UNKNOWN" },
+        slack: { posted: null, messageTs: null },
+        steps: [
+          {},
+          {},
+          {},
+          {
+            name: "receipt",
+            status: "completed",
+            detail: expect.stringContaining("24 hours"),
+          },
+        ],
+      },
     });
 
+    clock = REPLAY_TTL_SECONDS * 1000 - 1;
     const retryProviders = providers();
     const retry = await executeAccessRequest(
-      request,
+      { ...request, includeDetails: true },
       fixedDependencies(store, retryProviders),
     );
     expect(retry).toMatchObject({
-      httpStatus: 409,
-      receipt: { error: { code: "REQUEST_IN_PROGRESS" } },
+      httpStatus: 200,
+      replayed: true,
+      receipt: {
+        status: "indeterminate",
+        runId: first.receipt.runId,
+        error: { code: "SLACK_DELIVERY_UNKNOWN" },
+      },
     });
+    expect(retry.receipt).toEqual(first.receipt);
     expect(retryProviders.slack.postAccessRequest).not.toHaveBeenCalled();
+    expect(retryProviders.github.readEffectivePermission).not.toHaveBeenCalled();
+
+    clock = REPLAY_TTL_SECONDS * 1000;
+    const afterExpiryProviders = providers();
+    const afterExpiry = await executeAccessRequest(
+      request,
+      fixedDependencies(store, afterExpiryProviders),
+    );
+    expect(afterExpiry).toMatchObject({
+      httpStatus: 200,
+      replayed: false,
+      receipt: { status: "completed" },
+    });
+    expect(afterExpiryProviders.slack.postAccessRequest).toHaveBeenCalledOnce();
+  });
+
+  it("returns ambiguous Slack delivery as indeterminate without a requestId", async () => {
+    const store = await connectedStore();
+    const providerSet = providers({
+      slackError: new AppError(
+        "SLACK_DELIVERY_UNKNOWN",
+        "Delivery could not be confirmed",
+        502,
+        { ambiguousDelivery: true },
+      ),
+    });
+    const result = await executeAccessRequest(
+      {
+        ...request,
+        requestId: undefined,
+        includeDetails: true,
+      },
+      fixedDependencies(store, providerSet),
+    );
+
+    expect(result).toMatchObject({
+      httpStatus: 502,
+      replayed: false,
+      receipt: {
+        status: "indeterminate",
+        requestId: null,
+        error: { code: "SLACK_DELIVERY_UNKNOWN" },
+        slack: { posted: null, messageTs: null },
+        steps: [
+          {},
+          {},
+          {},
+          {
+            name: "receipt",
+            status: "not_attempted",
+            detail: expect.stringContaining("No requestId was supplied"),
+          },
+        ],
+      },
+    });
+    expect(providerSet.slack.postAccessRequest).toHaveBeenCalledOnce();
   });
 
   it("stores partial_failure before a noncritical metadata write", async () => {

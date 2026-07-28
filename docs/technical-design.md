@@ -211,18 +211,31 @@ nonempty `role_name` or legacy `permission`. Otherwise the app returns
 `completed` means Slack returned a nonempty message timestamp and finalization
 succeeded.
 
-`partial_failure` means Slack confirmed the post and the replay-safe result was
-stored, but later metadata work failed. The response uses HTTP `200` because an
-automatic retry would risk another approval card.
+`partial_failure` means Slack confirmed the post and, when `requestId` was
+supplied, the replay-safe result was stored, but later metadata work failed.
+Without `requestId`, the receipt explicitly states that no replay protection
+exists. The response uses HTTP `200` because an automatic retry would risk
+another approval card.
 
-### Unknown Slack delivery
+### Indeterminate delivery and replay
 
 A timeout, network error after request transmission, or malformed successful
-Slack response cannot prove whether Slack accepted the post. The app returns
-`SLACK_DELIVERY_UNKNOWN`, marks the result as ambiguous, and leaves an acquired
-processing record to expire for five minutes. The caller must not retry
-automatically. The browser tells the reviewer to inspect the configured Slack
-channel for the request ID before taking any further action.
+Slack response cannot prove whether Slack accepted the post. The app returns an
+`indeterminate` receipt with `SLACK_DELIVERY_UNKNOWN`.
+
+When `requestId` is present, the app atomically replaces the processing lease
+with that indeterminate receipt for the standard 24-hour replay TTL. A retry
+with the same request ID returns the stored receipt without reading GitHub or
+attempting another Slack post. An unconfirmed side effect must be treated as if
+it may exist. Releasing the lease would invite the duplicate post that the
+request ID exists to prevent. The reviewer reconciles the result by searching
+the configured Slack channel for the request ID already included in the
+message.
+
+Without `requestId`, the app returns the same indeterminate receipt but has no
+lease or replay record to manage. Replay protection requires a request ID. If
+Redis cannot persist the indeterminate result, the receipt says that storage
+could not be confirmed and the caller still must not retry automatically.
 
 ### Unconfirmed replay protection
 
@@ -268,7 +281,8 @@ message itself from becoming the source of authorization.
 
 ## Security boundaries
 
-- The trigger compares its Bearer secret in constant time.
+- The trigger SHA-256 hashes the supplied and expected Bearer secrets, then
+  compares the equal-length digests with `crypto.timingSafeEqual`.
 - The browser runner requires a signed admin session and same-origin JSON.
 - Browser-supplied input cannot select the repository or Slack channel.
 - Admin sessions and OAuth state use HMAC signatures.

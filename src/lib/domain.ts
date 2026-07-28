@@ -21,7 +21,11 @@ export type Decision =
   | "approval_needed"
   | "already_sufficient"
   | "manual_review";
-export type ExecutionStatus = "completed" | "failed" | "partial_failure";
+export type ExecutionStatus =
+  | "completed"
+  | "failed"
+  | "partial_failure"
+  | "indeterminate";
 
 export type NormalizedAccessRequest = {
   githubUsername: string;
@@ -62,7 +66,7 @@ export type InternalReceipt = {
   };
   slack: {
     channel: string;
-    posted: boolean;
+    posted: boolean | null;
     messageTs: string | null;
   };
   error?: ReceiptError;
