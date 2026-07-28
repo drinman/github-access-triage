@@ -61,7 +61,7 @@ Slack post.
 
 ## Verified production receipt
 
-The production acceptance run completed on July 28, 2026 at 9:33 AM PT.
+The production acceptance run completed on July 28, 2026 at 11:41 AM PT.
 
 | Evidence | Observed value |
 | --- | --- |
@@ -70,12 +70,13 @@ The production acceptance run completed on July 28, 2026 at 9:33 AM PT.
 | Requested permission | `write` |
 | Effective permission | `none` |
 | Decision | `approval_needed` |
-| Slack message timestamp | `1785256423.998369` |
-| Run ID | `d8ea4a43-e157-422c-af55-344b7107a1d3` |
+| Slack message timestamp | `1785264089.159979` |
+| Run ID | `02780157-bfd8-4fd8-a1c1-3ec6df6b85f3` |
+| Request ID | `manual-handoff-00f48225-eabb-46f3-bd9b-fdff50b3b6da` |
 | Replay | Same run ID and Slack timestamp, with no duplicate post |
 | Public status | `ready`, with GitHub and Slack connected |
 
-![Verified Slack approval card](docs/slack-approval.jpg)
+![Verified Slack manual approval handoff](docs/slack-approval.jpg)
 
 The same production pass also confirmed `401` for missing authentication, `400`
 for an invalid payload, and `404 GITHUB_REPOSITORY_NOT_ACCESSIBLE` without a
@@ -302,7 +303,7 @@ Production acceptance on July 28, 2026 confirmed:
 1. The public URL and `/api/status` work without a Vercel login.
 2. GitHub and Slack report `connected`.
 3. A live GitHub read produced an approval-needed decision.
-4. Slack accepted the approval card in `#access-requests`.
+4. Slack accepted the manual approval handoff in `#access-requests`.
 5. Replaying the same request returned the original run without another post.
 6. Authentication, validation, and inaccessible-repository failures returned
    contextual errors.
