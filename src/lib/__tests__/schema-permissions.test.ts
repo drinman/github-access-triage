@@ -30,6 +30,10 @@ describe("request parsing", () => {
   it.each([
     { ...valid, unknown: true },
     { ...valid, repository: "one/two/three" },
+    { ...valid, repository: "../rate_limit" },
+    { ...valid, repository: "owner/.." },
+    { ...valid, repository: "./repo" },
+    { ...valid, repository: "owner/." },
     { ...valid, githubUsername: "-invalid" },
     { ...valid, reason: "" },
     { ...valid, slackChannel: "access-requests" },
@@ -37,6 +41,15 @@ describe("request parsing", () => {
   ])("rejects invalid input", (input) => {
     expect(() => parseAccessRequest(input)).toThrow(AppError);
   });
+
+  it.each(["owner.name/repo.name", "owner/.github"])(
+    "allows valid dotted repository names: %s",
+    (repository) => {
+      expect(
+        parseAccessRequest({ ...valid, repository }).repository,
+      ).toBe(repository);
+    },
+  );
 });
 
 describe("permission decisions", () => {

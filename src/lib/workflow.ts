@@ -165,7 +165,9 @@ export async function executeAccessRequest(
     {
       name: "receipt",
       status: "not_attempted",
-      detail: "No replayable receipt was stored.",
+      detail: request.requestId
+        ? "No replayable receipt was stored."
+        : "No requestId was supplied. No replay protection is available.",
     },
   ];
 
@@ -281,10 +283,10 @@ export async function executeAccessRequest(
         ...steps.slice(0, 3),
         {
           name: "receipt",
-          status: "completed",
+          status: request.requestId ? "completed" : "not_attempted",
           detail: request.requestId
             ? "A replayable result was stored for 24 hours."
-            : "No requestId was supplied; no replay record was requested.",
+            : "No requestId was supplied. No replay protection is available; retrying may post a duplicate Slack message.",
         },
       ],
     };
@@ -292,20 +294,23 @@ export async function executeAccessRequest(
     const partialReceipt: InternalReceipt = {
       ...completedReceipt,
       status: "partial_failure",
-      summary:
-        "Slack posted the message, but post-delivery finalization did not complete.",
+      summary: request.requestId
+        ? "Slack posted the message, but post-delivery finalization did not complete."
+        : "Slack posted the message, but post-delivery finalization did not complete. No requestId was supplied, so retrying may post a duplicate.",
       error: {
         code: "POST_DELIVERY_FINALIZATION_FAILED",
-        message:
-          "Slack confirmed the message. The stored result prevents a duplicate post where a requestId was supplied.",
+        message: request.requestId
+          ? "Slack confirmed the message. The stored result prevents a duplicate post."
+          : "Slack confirmed the message, but no requestId was supplied, so no replay protection is available. Do not retry automatically.",
       },
       steps: [
         ...steps.slice(0, 3),
         {
           name: "receipt",
-          status: "completed",
-          detail:
-            "A replay-safe post-delivery result was stored before final metadata updates.",
+          status: request.requestId ? "completed" : "not_attempted",
+          detail: request.requestId
+            ? "A replay-safe post-delivery result was stored before final metadata updates."
+            : "No requestId was supplied. No replayable receipt exists, and retrying may duplicate the Slack post.",
         },
       ],
     };

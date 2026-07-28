@@ -1,5 +1,9 @@
 import { Redis } from "@upstash/redis";
 
+import { requireEnv } from "@/lib/env";
+
+const STORE_TIMEOUT_MS = 5_000;
+
 export interface KeyValueStore {
   get<T>(key: string): Promise<T | null>;
   set<T>(key: string, value: T, ttlSeconds?: number): Promise<void>;
@@ -34,7 +38,11 @@ export class UpstashStore implements KeyValueStore {
 
   private client(): Redis {
     if (!this.redis) {
-      this.redis = Redis.fromEnv();
+      this.redis = new Redis({
+        url: requireEnv("UPSTASH_REDIS_REST_URL"),
+        token: requireEnv("UPSTASH_REDIS_REST_TOKEN"),
+        signal: () => AbortSignal.timeout(STORE_TIMEOUT_MS),
+      });
     }
     return this.redis;
   }

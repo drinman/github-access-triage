@@ -9,10 +9,20 @@ const githubUsernamePattern =
 const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const slackChannelPattern = /^[CG][A-Z0-9]{8,20}$/;
 
+function hasSafeRepositorySegments(repository: string): boolean {
+  return repository
+    .split("/")
+    .every((segment) => segment !== "." && segment !== "..");
+}
+
 const accessRequestSchema = z
   .object({
     githubUsername: z.string().trim().min(1).max(39).regex(githubUsernamePattern),
-    repository: z.string().trim().regex(repositoryPattern),
+    repository: z
+      .string()
+      .trim()
+      .regex(repositoryPattern)
+      .refine(hasSafeRepositorySegments),
     requestedPermission: z.enum(REQUESTED_PERMISSIONS),
     reason: z.string().trim().min(1).max(500),
     slackChannel: z.string().trim().regex(slackChannelPattern),

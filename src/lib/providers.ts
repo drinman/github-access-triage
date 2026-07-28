@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { createAppAuth } from "@octokit/auth-app";
+import { request as octokitRequest } from "@octokit/request";
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
 import type {
@@ -18,6 +19,7 @@ import { interpretPermission } from "@/lib/permissions";
 import type { KeyValueStore } from "@/lib/store";
 
 const GITHUB_API_VERSION = "2026-03-10";
+const PROVIDER_TIMEOUT_MS = 10_000;
 const SLACK_AUTH_ERRORS = new Set([
   "invalid_auth",
   "token_revoked",
@@ -29,12 +31,59 @@ const SLACK_AUTH_ERRORS = new Set([
 
 type JsonObject = Record<string, unknown>;
 
+function providerSignal(): AbortSignal {
+  return AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
+}
+
 async function safeJson(response: Response): Promise<JsonObject> {
   try {
-    return (await response.json()) as JsonObject;
+    const value: unknown = await response.json();
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value)
+    ) {
+      return {};
+    }
+    return value as JsonObject;
   } catch {
     return {};
   }
+}
+
+function nonemptyString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parseRepository(repository: string): {
+  owner: string;
+  name: string;
+} {
+  const segments = repository.split("/");
+  const [owner, name] = segments;
+  const validSegment = /^[A-Za-z0-9_.-]+$/;
+  if (
+    segments.length !== 2 ||
+    !owner ||
+    !name ||
+    owner === "." ||
+    owner === ".." ||
+    name === "." ||
+    name === ".." ||
+    !validSegment.test(owner) ||
+    !validSegment.test(name)
+  ) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "The repository must contain a valid owner and name.",
+      400,
+    );
+  }
+  return { owner, name };
 }
 
 function numericStatus(error: unknown): number | null {
@@ -49,6 +98,13 @@ function numericStatus(error: unknown): number | null {
   return null;
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof DOMException &&
+    (error.name === "AbortError" || error.name === "TimeoutError")
+  );
+}
+
 function githubHeaders(token: string): HeadersInit {
   return {
     Accept: "application/vnd.github+json",
@@ -61,16 +117,34 @@ function githubHeaders(token: string): HeadersInit {
 async function mintGitHubToken(
   installationId: number,
 ): Promise<string> {
+  const { name: repositoryName } = parseRepository(
+    requireEnv("DEMO_GITHUB_REPOSITORY"),
+  );
   try {
     const auth = createAppAuth({
       appId: requireEnv("GITHUB_APP_ID"),
       privateKey: requireEnv("GITHUB_PRIVATE_KEY").replace(/\\n/g, "\n"),
       installationId,
+      request: octokitRequest.defaults({
+        request: { signal: providerSignal() },
+      }),
     });
-    const result = await auth({ type: "installation" });
+    const result = await auth({
+      type: "installation",
+      repositoryNames: [repositoryName],
+      permissions: { metadata: "read" },
+    });
     return result.token;
   } catch (error) {
     const status = numericStatus(error);
+    if (isAbortError(error) || status === null || status >= 500) {
+      throw new AppError(
+        "GITHUB_PROVIDER_UNAVAILABLE",
+        "GitHub could not be reached while minting a scoped token. Retry the request.",
+        502,
+        { cause: error },
+      );
+    }
     throw new AppError(
       "GITHUB_CONNECTION_REQUIRED",
       "The GitHub App installation is no longer available. Reconnect GitHub.",
@@ -86,18 +160,29 @@ async function mintGitHubToken(
 async function readGitHubInstallationMetadata(
   installationId: number,
 ): Promise<JsonObject> {
-  const auth = createAppAuth({
-    appId: requireEnv("GITHUB_APP_ID"),
-    privateKey: requireEnv("GITHUB_PRIVATE_KEY").replace(/\\n/g, "\n"),
-  });
-  const appAuthentication = await auth({ type: "app" });
-  const response = await fetch(
-    `https://api.github.com/app/installations/${installationId}`,
-    {
-      headers: githubHeaders(appAuthentication.token),
-      cache: "no-store",
-    },
-  );
+  let response: Response;
+  try {
+    const auth = createAppAuth({
+      appId: requireEnv("GITHUB_APP_ID"),
+      privateKey: requireEnv("GITHUB_PRIVATE_KEY").replace(/\\n/g, "\n"),
+    });
+    const appAuthentication = await auth({ type: "app" });
+    response = await fetch(
+      `https://api.github.com/app/installations/${installationId}`,
+      {
+        headers: githubHeaders(appAuthentication.token),
+        cache: "no-store",
+        signal: providerSignal(),
+      },
+    );
+  } catch (error) {
+    throw new AppError(
+      "GITHUB_INSTALLATION_NOT_VERIFIED",
+      "GitHub could not be reached while verifying this installation.",
+      502,
+      { cause: error },
+    );
+  }
   if (!response.ok) {
     throw new AppError(
       "GITHUB_INSTALLATION_NOT_VERIFIED",
@@ -163,6 +248,9 @@ export class LiveGitHubProvider implements GitHubProvider {
     connection: GitHubConnection,
     request: NormalizedAccessRequest,
   ): Promise<GitHubPermissionResult> {
+    const { owner, name } = parseRepository(request.repository);
+    const encodedOwner = encodeURIComponent(owner);
+    const encodedName = encodeURIComponent(name);
     let currentConnection = connection;
     let token: string;
     try {
@@ -178,12 +266,12 @@ export class LiveGitHubProvider implements GitHubProvider {
       throw error;
     }
 
-    const [owner, repo] = request.repository.split("/");
     const call = async (path: string) => {
       try {
         return await fetch(`https://api.github.com${path}`, {
           headers: githubHeaders(token),
           cache: "no-store",
+          signal: providerSignal(),
         });
       } catch (error) {
         throw new AppError(
@@ -195,7 +283,9 @@ export class LiveGitHubProvider implements GitHubProvider {
       }
     };
 
-    const repositoryResponse = await call(`/repos/${owner}/${repo}`);
+    const repositoryResponse = await call(
+      `/repos/${encodedOwner}/${encodedName}`,
+    );
 
     if (repositoryResponse.status === 404) {
       throw new AppError(
@@ -220,7 +310,7 @@ export class LiveGitHubProvider implements GitHubProvider {
     await this.assertGitHubResponse(userResponse, currentConnection);
 
     const permissionResponse = await call(
-      `/repos/${owner}/${repo}/collaborators/${encodeURIComponent(
+      `/repos/${encodedOwner}/${encodedName}/collaborators/${encodeURIComponent(
         request.githubUsername,
       )}/permission`,
     );
@@ -229,11 +319,17 @@ export class LiveGitHubProvider implements GitHubProvider {
     }
     await this.assertGitHubResponse(permissionResponse, currentConnection);
     const body = await safeJson(permissionResponse);
+    const roleName = nonemptyString(body.role_name);
+    const legacyPermission = nonemptyString(body.permission);
+    if (!roleName && !legacyPermission) {
+      throw new AppError(
+        "GITHUB_PROVIDER_ERROR",
+        "GitHub returned an invalid permission response.",
+        502,
+      );
+    }
 
-    return interpretPermission(
-      typeof body.role_name === "string" ? body.role_name : null,
-      typeof body.permission === "string" ? body.permission : null,
-    );
+    return interpretPermission(roleName, legacyPermission);
   }
 
   private async assertGitHubResponse(
@@ -408,6 +504,7 @@ export class LiveSlackProvider implements SlackProvider {
           unfurl_media: false,
         }),
         cache: "no-store",
+        signal: providerSignal(),
       });
     } catch (error) {
       throw new AppError(
@@ -436,10 +533,39 @@ export class LiveSlackProvider implements SlackProvider {
     }
 
     const body = await safeJson(response);
-    if (!response.ok || body.ok !== true) {
-      const providerCode =
-        typeof body.error === "string" ? body.error : "unknown_error";
-      if (SLACK_AUTH_ERRORS.has(providerCode)) {
+    const providerCode = nonemptyString(body.error);
+    if (response.ok && body.ok === true) {
+      const messageTs = nonemptyString(body.ts);
+      if (!messageTs) {
+        throw new AppError(
+          "SLACK_DELIVERY_UNKNOWN",
+          "Slack accepted the request but did not return a message identifier.",
+          502,
+          { ambiguousDelivery: true },
+        );
+      }
+
+      try {
+        await this.store.compareAndSet(
+          STORE_KEYS.slackConnection,
+          connection,
+          {
+            ...connection,
+            status: "connected" as const,
+            lastVerifiedAt: this.now().toISOString(),
+          },
+        );
+      } catch {
+        // Receipt persistence is the first critical write after this method returns.
+      }
+
+      return { messageTs };
+    }
+
+    const explicitRejection = body.ok === false && providerCode !== null;
+    if (!response.ok || explicitRejection) {
+      const rejectionCode = providerCode ?? "unknown_error";
+      if (SLACK_AUTH_ERRORS.has(rejectionCode)) {
         try {
           await markSlackInvalid(this.store, connection);
         } catch {
@@ -452,14 +578,14 @@ export class LiveSlackProvider implements SlackProvider {
           { credentialInvalid: true },
         );
       }
-      if (providerCode === "not_in_channel") {
+      if (rejectionCode === "not_in_channel") {
         throw new AppError(
           "SLACK_BOT_NOT_IN_CHANNEL",
           "The Slack bot is not a member of the supplied channel. Invite it or use the demo channel documented in the README.",
           422,
         );
       }
-      if (providerCode === "channel_not_found") {
+      if (rejectionCode === "channel_not_found") {
         throw new AppError(
           "SLACK_CHANNEL_NOT_FOUND",
           "The supplied Slack channel was not found or is not accessible to the connected bot.",
@@ -468,8 +594,8 @@ export class LiveSlackProvider implements SlackProvider {
       }
       if (
         response.status >= 500 ||
-        providerCode === "internal_error" ||
-        providerCode === "fatal_error"
+        rejectionCode === "internal_error" ||
+        rejectionCode === "fatal_error"
       ) {
         throw new AppError(
           "SLACK_DELIVERY_UNKNOWN",
@@ -485,30 +611,12 @@ export class LiveSlackProvider implements SlackProvider {
       );
     }
 
-    if (typeof body.ts !== "string") {
-      throw new AppError(
-        "SLACK_DELIVERY_UNKNOWN",
-        "Slack accepted the request but did not return a message identifier.",
-        502,
-        { ambiguousDelivery: true },
-      );
-    }
-
-    try {
-      await this.store.compareAndSet(
-        STORE_KEYS.slackConnection,
-        connection,
-        {
-          ...connection,
-          status: "connected" as const,
-          lastVerifiedAt: this.now().toISOString(),
-        },
-      );
-    } catch {
-      // Receipt persistence is the first critical write after this method returns.
-    }
-
-    return { messageTs: body.ts };
+    throw new AppError(
+      "SLACK_DELIVERY_UNKNOWN",
+      "Slack returned a malformed delivery response. The request is held briefly to reduce duplicate risk.",
+      502,
+      { ambiguousDelivery: true },
+    );
   }
 }
 
@@ -517,9 +625,9 @@ export async function exchangeGitHubOAuthCode(input: {
   codeVerifier: string;
   redirectUri: string;
 }): Promise<string> {
-  const response = await fetch(
-    "https://github.com/login/oauth/access_token",
-    {
+  let response: Response;
+  try {
+    response = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -533,8 +641,16 @@ export async function exchangeGitHubOAuthCode(input: {
         redirect_uri: input.redirectUri,
       }),
       cache: "no-store",
-    },
-  );
+      signal: providerSignal(),
+    });
+  } catch (error) {
+    throw new AppError(
+      "GITHUB_OAUTH_FAILED",
+      "GitHub could not be reached during OAuth. Retry the connection.",
+      502,
+      { cause: error },
+    );
+  }
   const body = await safeJson(response);
   if (!response.ok || typeof body.access_token !== "string") {
     throw new AppError(
@@ -551,13 +667,24 @@ export async function verifyGitHubInstallation(input: {
   userToken: string;
   now?: Date;
 }): Promise<GitHubConnection> {
-  const userResponse = await fetch(
-    `https://api.github.com/user/installations/${input.installationId}/repositories?per_page=1`,
-    {
-      headers: githubHeaders(input.userToken),
-      cache: "no-store",
-    },
-  );
+  let userResponse: Response;
+  try {
+    userResponse = await fetch(
+      `https://api.github.com/user/installations/${input.installationId}/repositories?per_page=100`,
+      {
+        headers: githubHeaders(input.userToken),
+        cache: "no-store",
+        signal: providerSignal(),
+      },
+    );
+  } catch (error) {
+    throw new AppError(
+      "GITHUB_INSTALLATION_NOT_VERIFIED",
+      "GitHub could not be reached while verifying this installation.",
+      502,
+      { cause: error },
+    );
+  }
   if (!userResponse.ok) {
     throw new AppError(
       "GITHUB_INSTALLATION_NOT_VERIFIED",
@@ -569,6 +696,44 @@ export async function verifyGitHubInstallation(input: {
   const installation = await readGitHubInstallationMetadata(
     input.installationId,
   );
+  const repositorySelection =
+    (installation.repository_selection ??
+      userBody.repository_selection) === "all"
+      ? "all"
+      : "selected";
+  if (repositorySelection === "all") {
+    throw new AppError(
+      "GITHUB_REPOSITORY_SCOPE_REQUIRED",
+      "Configure the GitHub App installation for only the demo repository.",
+      403,
+    );
+  }
+  const configuredRepository = requireEnv("DEMO_GITHUB_REPOSITORY")
+    .trim()
+    .toLowerCase();
+  const selectedRepositories = Array.isArray(userBody.repositories)
+    ? userBody.repositories
+        .map((repository) =>
+          typeof repository === "object" &&
+          repository !== null &&
+          !Array.isArray(repository)
+            ? nonemptyString((repository as JsonObject).full_name)
+            : null,
+        )
+        .filter((repository): repository is string => repository !== null)
+        .map((repository) => repository.toLowerCase())
+    : null;
+  if (
+    userBody.total_count !== 1 ||
+    selectedRepositories?.length !== 1 ||
+    selectedRepositories[0] !== configuredRepository
+  ) {
+    throw new AppError(
+      "GITHUB_REPOSITORY_SCOPE_REQUIRED",
+      "Configure the GitHub App installation for only the demo repository.",
+      403,
+    );
+  }
   const account =
     typeof installation.account === "object" && installation.account
       ? (installation.account as JsonObject)
@@ -586,11 +751,7 @@ export async function verifyGitHubInstallation(input: {
       typeof account.login === "string" ? account.login : "GitHub installation",
     accountType:
       account.type === "Organization" ? "Organization" : "User",
-    repositorySelection:
-      (installation.repository_selection ??
-        userBody.repository_selection) === "all"
-        ? "all"
-        : "selected",
+    repositorySelection,
     connectedAt: verifiedAt,
     lastVerifiedAt: verifiedAt,
   };
@@ -616,18 +777,29 @@ export async function exchangeAndVerifySlack(input: {
   const credentials = Buffer.from(
     `${requireEnv("SLACK_CLIENT_ID")}:${requireEnv("SLACK_CLIENT_SECRET")}`,
   ).toString("base64");
-  const response = await fetch("https://slack.com/api/oauth.v2.access", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${credentials}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      code: input.code,
-      redirect_uri: input.redirectUri,
-    }),
-    cache: "no-store",
-  });
+  let response: Response;
+  try {
+    response = await fetch("https://slack.com/api/oauth.v2.access", {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${credentials}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        code: input.code,
+        redirect_uri: input.redirectUri,
+      }),
+      cache: "no-store",
+      signal: providerSignal(),
+    });
+  } catch (error) {
+    throw new AppError(
+      "SLACK_OAUTH_FAILED",
+      "Slack could not be reached during OAuth. Retry the connection.",
+      502,
+      { cause: error },
+    );
+  }
   const body = (await safeJson(response)) as SlackOAuthResponse;
 
   if (
@@ -649,24 +821,43 @@ export async function exchangeAndVerifySlack(input: {
       400,
     );
   }
-
-  const scopes = (body.scope ?? "")
-    .split(",")
-    .map((scope) => scope.trim())
-    .filter(Boolean);
-  if (!scopes.includes("chat:write")) {
+  if (body.token_type !== "bot") {
     throw new AppError(
-      "SLACK_SCOPE_REQUIRED",
-      "The Slack connection did not grant chat:write.",
+      "SLACK_TOKEN_TYPE_REQUIRED",
+      "The Slack connection must return a bot token.",
       403,
     );
   }
 
-  const authTestResponse = await fetch("https://slack.com/api/auth.test", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${body.access_token}` },
-    cache: "no-store",
-  });
+  const grantedScopes = (body.scope ?? "")
+    .split(",")
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+  const scopes = [...new Set(grantedScopes)];
+  if (scopes.length !== 1 || scopes[0] !== "chat:write") {
+    throw new AppError(
+      "SLACK_SCOPE_REQUIRED",
+      "The Slack connection must grant only chat:write.",
+      403,
+    );
+  }
+
+  let authTestResponse: Response;
+  try {
+    authTestResponse = await fetch("https://slack.com/api/auth.test", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${body.access_token}` },
+      cache: "no-store",
+      signal: providerSignal(),
+    });
+  } catch (error) {
+    throw new AppError(
+      "SLACK_OAUTH_FAILED",
+      "Slack could not verify the bot token. Retry the connection.",
+      502,
+      { cause: error },
+    );
+  }
   const authTest = await safeJson(authTestResponse);
   if (!authTestResponse.ok || authTest.ok !== true) {
     throw new AppError(

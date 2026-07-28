@@ -134,6 +134,41 @@ describe("workflow", () => {
     expect(providerSet.slack.postAccessRequest).toHaveBeenCalledTimes(1);
   });
 
+  it("truthfully reports that an omitted requestId has no replay protection", async () => {
+    const store = await connectedStore();
+    const providerSet = providers();
+    const requestWithoutId = {
+      ...request,
+      requestId: undefined,
+      includeDetails: true,
+    };
+
+    const first = await executeAccessRequest(
+      requestWithoutId,
+      fixedDependencies(store, providerSet),
+    );
+    expect(first.receipt).toMatchObject({
+      status: "completed",
+      requestId: null,
+      steps: [
+        {},
+        {},
+        {},
+        {
+          name: "receipt",
+          status: "not_attempted",
+          detail: expect.stringContaining("No replay protection"),
+        },
+      ],
+    });
+
+    await executeAccessRequest(
+      requestWithoutId,
+      fixedDependencies(store, providerSet),
+    );
+    expect(providerSet.slack.postAccessRequest).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps repository and user errors distinct and never calls Slack", async () => {
     const store = await connectedStore();
     const providerSet = providers({
