@@ -139,6 +139,12 @@ See [docs/technical-design.md](docs/technical-design.md) for the OAuth proof,
 permission model, idempotency state machine, failure semantics, and security
 boundaries.
 
+## Build process
+
+Built with AI-assisted tooling for planning and code generation, with review
+loops on every design decision. This mirrors how I work day to day. I’m happy
+to walk through the process in the debrief.
+
 ## Local setup and OAuth
 
 ### Requirements
