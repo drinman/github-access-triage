@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import type { GitHubConnection } from "@/lib/domain";
+import { STORE_KEYS } from "@/lib/domain";
 import { requireEnv } from "@/lib/env";
+import { createGitHubUserOAuthUrl } from "@/lib/github-oauth";
 import { createOAuthState } from "@/lib/oauth-state";
 import {
   getRequestAdminSession,
@@ -16,7 +19,24 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  const state = await createOAuthState(getStore(), {
+  const store = getStore();
+  const changeInstallation =
+    request.nextUrl.searchParams.get("mode") === "install";
+  const existingConnection = changeInstallation
+    ? null
+    : await store.get<GitHubConnection>(STORE_KEYS.githubConnection);
+
+  if (existingConnection) {
+    const target = await createGitHubUserOAuthUrl({
+      store,
+      requestUrl: request.url,
+      sessionHash: sessionBinding(session),
+      installationId: existingConnection.installationId,
+    });
+    return NextResponse.redirect(target);
+  }
+
+  const state = await createOAuthState(store, {
     kind: "github-install",
     sessionHash: sessionBinding(session),
   });

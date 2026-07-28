@@ -123,7 +123,13 @@ function IntegrationCard({
   connectHref: string;
 }) {
   const isConnected = snapshot.status === "connected";
-  const actionLabel = isConnected ? `Reconnect ${title}` : `Connect ${title}`;
+  const hasConnection = snapshot.status !== "disconnected";
+  const actionLabel =
+    provider === "github" && hasConnection
+      ? "Reverify GitHub"
+      : isConnected
+        ? `Reconnect ${title}`
+        : `Connect ${title}`;
 
   return (
     <article className="integration-card" data-state={snapshot.status}>
@@ -155,10 +161,27 @@ function IntegrationCard({
         ) : null}
       </dl>
 
-      <Link className="button button--secondary" href={connectHref}>
-        {actionLabel}
-        <span aria-hidden="true">↗</span>
-      </Link>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "12px",
+        }}
+      >
+        <Link className="button button--secondary" href={connectHref}>
+          {actionLabel}
+          <span aria-hidden="true">↗</span>
+        </Link>
+        {provider === "github" && hasConnection ? (
+          <Link
+            className="button button--secondary"
+            href={`${connectHref}?mode=install`}
+          >
+            Change installation scope
+            <span aria-hidden="true">↗</span>
+          </Link>
+        ) : null}
+      </div>
     </article>
   );
 }
