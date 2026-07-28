@@ -287,8 +287,9 @@ The current scope does not include:
 - KMS-backed key management
 - per-caller rate limits inside the application
 
-The Bearer secret controls the public trigger. Vercel edge controls are the
-deployment-level rate-limit boundary for this demo.
+The Bearer secret controls the public trigger. Custom per-source rate limits
+would belong in Vercel Firewall; this take-home does not claim they are
+configured.
 
 ## Verification
 
